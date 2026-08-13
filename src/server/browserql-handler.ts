@@ -157,7 +157,7 @@ export function createBqlHandler(input: {
         await sessions.close(session.id);
         await storage.deleteSession(session.id);
       }
-    });
+    }, "workflow");
     return {
       data: scheduled.result,
       extensions: {

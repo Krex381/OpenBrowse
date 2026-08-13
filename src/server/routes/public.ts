@@ -112,11 +112,12 @@ export function registerPublicRoutes(input: {
   });
   app.get("/healthz", async () => ({ ok: true }));
   app.get("/readyz", async (_request, reply) => {
-    const rssMb = process.memoryUsage.rss() / 1024 / 1024;
-    const ready = rssMb < config.memoryHardMb;
+    await pool.refreshMemory();
+    const memory = pool.memorySnapshot();
+    const ready = memory.totalRssMb < config.memoryHardMb;
     if (!ready)
       void notifyOperationalAlert("health-failure", {
-        rssMb: Math.round(rssMb),
+        rssMb: Math.round(memory.totalRssMb),
       });
     return reply.code(ready ? 200 : 503).send({
       ready,
@@ -124,19 +125,29 @@ export function registerPublicRoutes(input: {
     });
   });
   app.get("/metrics", async (_request, reply) => {
+    await pool.refreshMemory();
     const stats = queue.stats();
     const browser = pool.stats();
+    const memory = pool.memorySnapshot();
     reply.type("text/plain; version=0.0.4");
-    return `openbrowse_queue_depth ${stats.pending}\nopenbrowse_active_jobs ${stats.active}\nopenbrowse_memory_pressure ${stats.pressure === "normal" ? 0 : stats.pressure === "pressure" ? 1 : 2}\nopenbrowse_browser_processes ${browser.processes}\nopenbrowse_browser_contexts ${browser.busy}\n`;
+    return `openbrowse_queue_depth ${stats.pending}\nopenbrowse_active_jobs ${stats.active}\nopenbrowse_memory_pressure ${stats.pressure === "normal" ? 0 : stats.pressure === "pressure" ? 1 : 2}\nopenbrowse_node_rss_megabytes ${memory.nodeRssMb.toFixed(1)}\nopenbrowse_browser_tree_rss_megabytes ${memory.browserRssMb.toFixed(1)}\nopenbrowse_effective_rss_megabytes ${memory.totalRssMb.toFixed(1)}\nopenbrowse_browser_processes ${browser.processes}\nopenbrowse_browser_contexts ${browser.busy}\nopenbrowse_browser_workers_healthy ${browser.healthy}\nopenbrowse_browser_workers_draining ${browser.draining}\nopenbrowse_browser_workers_starting ${browser.starting}\n`;
   });
   app.get("/pressure", async () => {
+    await pool.refreshMemory();
     const stats = queue.stats();
     const browser = pool.stats();
-    const rssMb = process.memoryUsage.rss() / 1024 / 1024;
+    const memory = pool.memorySnapshot();
     return {
       pressure: stats.pressure,
       memory: {
-        rssMb: Number(rssMb.toFixed(1)),
+        rssMb: Number(memory.totalRssMb.toFixed(1)),
+        nodeRssMb: Number(memory.nodeRssMb.toFixed(1)),
+        browserRssMb: Number(memory.browserRssMb.toFixed(1)),
+        ...(memory.containerRssMb === undefined
+          ? {}
+          : { containerRssMb: Number(memory.containerRssMb.toFixed(1)) }),
+        processTreesSupported: memory.processTreesSupported,
+        sampledAt: new Date(memory.sampledAt).toISOString(),
         softLimitMb: config.memorySoftMb,
         hardLimitMb: config.memoryHardMb,
       },

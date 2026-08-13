@@ -2,6 +2,7 @@ import { load } from "cheerio";
 import { OpenBrowseError } from "../errors.js";
 import { assertSafeUrl, normalizeUrl } from "../security.js";
 import { httpFetch } from "./http.js";
+import { htmlToMarkdown } from "./markdown.js";
 import { BrowserPool } from "./pool.js";
 import { appearsClientRendered, timeout } from "./shared.js";
 import type { FetchInput, FetchResult, Output } from "./types.js";
@@ -89,12 +90,7 @@ export function transform(
   const answer: Pick<FetchResult, "html" | "markdown" | "links"> = {};
   if (outputs.includes("html")) answer.html = result.html;
   if (outputs.includes("markdown"))
-    answer.markdown = $("body")
-      .text()
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .join("\n\n");
+    answer.markdown = htmlToMarkdown(result.html, result.finalUrl);
   if (outputs.includes("links"))
     answer.links = $("a[href]")
       .map((_index, element) => {

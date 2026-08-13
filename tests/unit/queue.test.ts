@@ -30,4 +30,20 @@ describe("admission queue", () => {
     await Promise.all(active);
     expect((await queued).result).toBe(7);
   });
+  it("keeps independent p90 memory estimates for workload classes", async () => {
+    let rssMb = 100;
+    const queue = new AdmissionQueue(undefined, () => ({ totalRssMb: rssMb }));
+    await queue.run(async () => {
+      rssMb = 132;
+      return "http";
+    }, "http");
+    await queue.run(async () => {
+      rssMb = 388;
+      return "browser";
+    }, "browser");
+    const estimates = queue.stats().estimatesMb;
+    expect(estimates.http).toBe(32);
+    expect(estimates.browser).toBe(256);
+    expect(estimates.pdf).toBe(256);
+  });
 });

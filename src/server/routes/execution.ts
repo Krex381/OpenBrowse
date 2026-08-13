@@ -129,7 +129,7 @@ export function registerExecutionRoutes(input: {
     );
     return {
       urls: await queue
-        .run(() => mapSite(pool, body.url, body))
+        .run(() => mapSite(pool, body.url, body), "automation")
         .then((scheduled) => scheduled.result),
     };
   });
@@ -310,13 +310,15 @@ export function registerExecutionRoutes(input: {
     if (body.engine === "bounded")
       return {
         audits: await queue
-          .run(() =>
+        .run(
+          () =>
             basicPerformance(
               pool,
               { url: body.url, ...(body.timeout ? { timeoutMs: body.timeout } : {}) },
               { ...options, categories: options.categories?.filter((category) => category !== "pwa") },
             ),
-          )
+          "automation",
+        )
           .then((scheduled) => scheduled.result),
         engine: "openbrowse-hardened-performance-v1",
       };
@@ -332,7 +334,7 @@ export function registerExecutionRoutes(input: {
           },
         });
     const lighthouse = await queue
-      .run(() => fullLighthouse(body.url, { ...(body.timeout ? { timeoutMs: body.timeout } : {}), ...options }))
+      .run(() => fullLighthouse(body.url, { ...(body.timeout ? { timeoutMs: body.timeout } : {}), ...options }), "automation")
       .then((scheduled) => scheduled.result);
     const artifact = await storage.createArtifact(
       lighthouse.rawJson,
@@ -431,8 +433,9 @@ export function registerExecutionRoutes(input: {
     const body = parse(workflowSchema, request.body);
     const proxy = await resolveProxy(body.proxyId, requestKeyHash(request));
     return queue
-      .run(() =>
-        runWorkflow(
+      .run(
+        () =>
+          runWorkflow(
           pool,
           {
             url: body.url,
@@ -441,7 +444,8 @@ export function registerExecutionRoutes(input: {
             ...(proxy ? { proxy } : {}),
           },
           body.steps,
-        ),
+          ),
+        "workflow",
       )
       .then((scheduled) => scheduled.result);
   };
@@ -460,14 +464,16 @@ export function registerExecutionRoutes(input: {
     );
     const proxy = await resolveProxy(body.proxyId, requestKeyHash(request));
     const downloaded = await queue
-      .run(() =>
-        browserDownload(pool, {
+      .run(
+        () =>
+          browserDownload(pool, {
           url: body.url,
           selector: body.selector,
           index: body.index,
           ...(body.timeout ? { timeoutMs: body.timeout } : {}),
           ...(proxy ? { proxy } : {}),
-        }),
+          }),
+        "download",
       )
       .then((scheduled) => scheduled.result);
     reply.header(
@@ -501,14 +507,16 @@ export function registerExecutionRoutes(input: {
     );
     const proxy = await resolveProxy(body.proxyId, requestKeyHash(request));
     const recording = await queue
-      .run(() =>
-        recordVideo({
+      .run(
+        () =>
+          recordVideo({
           url: body.url,
           durationMs: body.durationMs,
           ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
           ...(body.viewport ? { viewport: body.viewport } : {}),
           ...(proxy ? { proxy } : {}),
-        }),
+          }),
+        "automation",
       )
       .then((scheduled) => scheduled.result);
     const artifact = await storage.createArtifact(

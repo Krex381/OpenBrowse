@@ -68,7 +68,10 @@ export function createFetchService(input: {
     }
     const compute = async () => {
       const totalStarted = Date.now();
-      const scheduled = await queue.run(() => adaptiveFetch(pool, input));
+      const scheduled = await queue.run(
+        () => adaptiveFetch(pool, input),
+        input.strategy === "http" ? "http" : "browser",
+      );
       const result = scheduled.result;
       const response = {
         requestId: "",

@@ -65,10 +65,16 @@ export async function buildServer(): Promise<Services> {
   const storage = new Storage();
   await storage.initialize();
   const cache = new Cache(storage);
-  const queue = new AdmissionQueue(() => {
-    void notifyOperationalAlert("queue", queue.stats());
-  });
   const pool = new BrowserPool();
+  const queue = new AdmissionQueue(() => {
+    const stats = queue.stats();
+    void notifyOperationalAlert("queue", {
+      active: stats.active,
+      pending: stats.pending,
+      pressure: stats.pressure,
+      estimatedJobMemoryMb: stats.estimatedJobMemoryMb,
+    });
+  }, () => pool.memorySnapshot());
   const sessions = new SessionManager();
   const cdp = new CdpReconnectManager();
   await app.register(swagger, {

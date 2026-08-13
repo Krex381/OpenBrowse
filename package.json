@@ -23,7 +23,8 @@
     "test:raw-bridge": "node scripts/test-raw-bridge.mjs",
     "test:all": "npm run test && npm run test:integration && npm run test:raw-bridge",
     "verify:new-features": "node scripts/verify-new-features.mjs",
-    "verify:docker": "node scripts/verify-docker.mjs"
+    "verify:docker": "node scripts/verify-docker.mjs",
+    "benchmark:soak": "node scripts/soak-benchmark.mjs"
   },
   "dependencies": {
     "@fastify/swagger": "^9.4.0",

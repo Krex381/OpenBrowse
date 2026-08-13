@@ -35,8 +35,8 @@ flowchart LR
 |---|---|
 | **HTTP first** | Fetch public content directly; escalate only for client-rendered pages. |
 | **Owned state** | Sessions, profiles, artifacts, replays, proxies, and webhooks belong to the API key that created them. |
-| **Controlled browser work** | Queue limits, memory admission, browser recycling, timeouts, and bounded outputs are built in. |
-| **Useful interfaces** | REST, BrowserQL, Streamable HTTP MCP, migration aliases, and a session-scoped VNC viewer. |
+| **Controlled browser work** | Process-tree memory admission, bounded contexts, worker health/draining, restart backoff, timeouts, and bounded outputs. |
+| **Core API** | Fetch, render, extract, screenshots, PDFs, and owned browser sessions. |
 
 ## Start here
 
@@ -91,15 +91,14 @@ curl -X POST http://localhost:3000/v1/fetch \
 client-rendered. The OpenAPI document is available at `/openapi.json`; the
 local product UI is at `/landing`.
 
-## Interfaces
+## Core API and optional interfaces
 
 | Interface | What it is for | Authentication |
 |---|---|---|
-| Native REST | Content, screenshots, PDFs, sessions, artifacts, jobs, and operations. | `Authorization: Bearer <key>` |
-| Migration aliases | Browserless-style content, scrape, map, crawl, search, export, download, and BrowserQL routes. | `?token=<key>` |
-| BrowserQL | A bounded GraphQL mutation surface for navigation, interaction, extraction, screenshots, and PDFs. | Bearer token or migration token |
-| MCP | Streamable HTTP MCP tools for fetch, extract, map, screenshot, and stateful browser sessions. | Bearer token |
-| VNC viewer | An authenticated, session-scoped browser desktop for Docker live-viewer sessions. | Query token, required by browser WebSockets |
+| Native REST | **Core**: fetch, render, extract, screenshots, PDFs, sessions, artifacts, and jobs. | `Authorization: Bearer <key>` |
+| Migration aliases | Compatibility layer for staged Browserless migrations. | `?token=<key>` |
+| BrowserQL and MCP | Optional bounded query/tool interfaces over the same execution core. | Bearer token or migration token |
+| VNC viewer | Optional authenticated, session-scoped browser desktop for Docker live-viewer sessions. | Query token, required by browser WebSockets |
 
 Read [Browserless compatibility](docs/browserless-feature-audit.md) for the
 supported migration surface and [architecture](docs/architecture.md) for the
@@ -153,6 +152,26 @@ npm audit --omit=dev --audit-level=high
 
 GitHub Actions runs the same checks and the Docker verifier for pushes and pull
 requests.
+
+## Benchmark and soak validation
+
+Use measured data from your own deployment; OpenBrowse does not publish
+synthetic capacity claims. The soak runner mixes four HTTP-first requests with
+one forced browser render, reports p50/p95 latency, failures, worker state,
+and Node, Chromium-tree, and cgroup memory snapshots.
+
+```bash
+export OPENBROWSE_BENCHMARK_API_KEY="$OPENBROWSE_API_KEY"
+export OPENBROWSE_BENCHMARK_TARGET='https://example.com'
+export OPENBROWSE_BENCHMARK_REQUESTS=1000
+export OPENBROWSE_BENCHMARK_CONCURRENCY=4
+npm run benchmark:soak > benchmark.json
+```
+
+For reliability evidence, run the same command with a controlled target for
+one hour, six hours, and twenty-four hours. Keep the JSON output with the
+deployment configuration and inspect `failures`, `memory`, and the p95 values
+before calling a capacity figure production-ready.
 
 ## License and notices
 

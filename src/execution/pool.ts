@@ -1,44 +1,145 @@
 import {
   chromium,
   type Browser,
+  type BrowserServer,
   type BrowserContext,
   type Page,
 } from "playwright";
 import { chromiumExtensionArgs, config } from "../config.js";
 import { OpenBrowseError } from "../errors.js";
+import { measureBrowserProcessTrees } from "../process-memory.js";
 import { assertSafeUrl } from "../security.js";
 import type { StoredProxy } from "../storage.js";
 import { defaultProxySettings, proxySettings } from "./shared.js";
 import type { Viewport } from "./types.js";
 
+type WorkerState = "healthy" | "draining" | "dead";
+
 interface Worker {
+  id: string;
   browser: Browser;
+  server: BrowserServer;
+  pid: number;
   jobs: number;
   createdAt: number;
   active: number;
+  failures: number;
+  state: WorkerState;
+  rssMb: number;
+}
+
+export interface BrowserMemorySnapshot {
+  nodeRssMb: number;
+  browserRssMb: number;
+  containerRssMb?: number;
+  totalRssMb: number;
+  processTreesSupported: boolean;
+  sampledAt: number;
+}
+
+export interface BrowserPoolStats {
+  ready: number;
+  busy: number;
+  processes: number;
+  healthy: number;
+  draining: number;
+  starting: number;
+  dead: number;
+  browserRssMb: number;
+  contextCapacity: number;
+}
+
+function nodeRssMb(): number {
+  return process.memoryUsage.rss() / 1024 / 1024;
 }
 
 export class BrowserPool {
   private readonly workers: Worker[] = [];
+  private launching = 0;
+  private launchFailures = 0;
+  private nextLaunchAt = 0;
+  private closed = false;
+  private memory: BrowserMemorySnapshot = {
+    nodeRssMb: nodeRssMb(),
+    browserRssMb: 0,
+    totalRssMb: nodeRssMb(),
+    processTreesSupported: process.platform === "linux",
+    sampledAt: Date.now(),
+  };
+  private refreshing: Promise<void> | undefined;
+
   async initialize(): Promise<void> {
+    this.closed = false;
     await Promise.all(
       Array.from({ length: config.browserPoolMin }, () => this.launch()),
     );
+    await this.refreshMemory();
   }
+
   async close(): Promise<void> {
+    this.closed = true;
+    const workers = this.workers.splice(0);
     await Promise.all(
-      this.workers
-        .splice(0)
-        .map(({ browser }) => browser.close().catch(() => undefined)),
+      workers.map(async (worker) => {
+        worker.state = "draining";
+        await worker.server.close().catch(() => undefined);
+      }),
     );
+    await this.refreshMemory(true);
   }
-  stats(): { ready: number; busy: number; processes: number } {
+
+  stats(): BrowserPoolStats {
+    const healthy = this.workers.filter((worker) => worker.state === "healthy");
     return {
-      ready: this.workers.filter((worker) => worker.active === 0).length,
-      busy: this.workers.filter((worker) => worker.active > 0).length,
+      ready: healthy.filter((worker) => worker.active === 0).length,
+      busy: healthy.reduce((total, worker) => total + worker.active, 0),
       processes: this.workers.length,
+      healthy: healthy.length,
+      draining: this.workers.filter((worker) => worker.state === "draining").length,
+      starting: this.launching,
+      dead: this.workers.filter((worker) => worker.state === "dead").length,
+      browserRssMb: Number(this.memory.browserRssMb.toFixed(1)),
+      contextCapacity: healthy.length * config.browserContextsPerWorker,
     };
   }
+
+  memorySnapshot(): BrowserMemorySnapshot {
+    return { ...this.memory };
+  }
+
+  async refreshMemory(force = false): Promise<void> {
+    if (!force && Date.now() - this.memory.sampledAt < 1000) return;
+    if (this.refreshing) return this.refreshing;
+    this.refreshing = (async () => {
+      const roots = this.workers
+        .filter((worker) => worker.state !== "dead")
+        .flatMap((worker) => (worker.pid ? [worker.pid] : []));
+      const measurement = await measureBrowserProcessTrees(roots);
+      let browserRssMb = 0;
+      for (const worker of this.workers) {
+        worker.rssMb = worker.pid
+          ? (measurement.trees.get(worker.pid)?.rssMb ?? 0)
+          : 0;
+        browserRssMb += worker.rssMb;
+      }
+      const nodeRss = nodeRssMb();
+      const processRss = nodeRss + browserRssMb;
+      this.memory = {
+        nodeRssMb: nodeRss,
+        browserRssMb,
+        ...(measurement.containerRssMb === undefined
+          ? {}
+          : { containerRssMb: measurement.containerRssMb }),
+        totalRssMb: Math.max(processRss, measurement.containerRssMb ?? 0),
+        processTreesSupported: measurement.supported,
+        sampledAt: Date.now(),
+      };
+    })().finally(() => {
+      this.refreshing = undefined;
+    });
+    return this.refreshing;
+  }
+
   async withContext<T>(
     viewport: Viewport | undefined,
     proxy: StoredProxy | undefined,
@@ -48,18 +149,21 @@ export class BrowserPool {
     worker.active++;
     let context: BrowserContext | undefined;
     try {
-      const contextProxy = proxy
-        ? proxySettings(proxy)
-        : defaultProxySettings();
-      context = await worker.browser.newContext({
-        viewport: {
-          width: viewport?.width ?? 1280,
-          height: viewport?.height ?? 720,
-        },
-        deviceScaleFactor: viewport?.deviceScaleFactor ?? 1,
-        serviceWorkers: "block",
-        ...(contextProxy ? { proxy: contextProxy } : {}),
-      });
+      const contextProxy = proxy ? proxySettings(proxy) : defaultProxySettings();
+      try {
+        context = await worker.browser.newContext({
+          viewport: {
+            width: viewport?.width ?? 1280,
+            height: viewport?.height ?? 720,
+          },
+          deviceScaleFactor: viewport?.deviceScaleFactor ?? 1,
+          serviceWorkers: "block",
+          ...(contextProxy ? { proxy: contextProxy } : {}),
+        });
+      } catch (error) {
+        this.recordFailure(worker);
+        throw error;
+      }
       await context.route("**/*", async (route) => {
         try {
           await assertSafeUrl(route.request().url(), proxy?.allowedDomains);
@@ -73,51 +177,147 @@ export class BrowserPool {
       await context?.close().catch(() => undefined);
       worker.active--;
       worker.jobs++;
+      await this.refreshMemory();
       await this.recycle(worker);
     }
   }
+
   private async acquire(): Promise<Worker> {
+    if (this.closed)
+      throw new OpenBrowseError(
+        "NO_BROWSER_CAPACITY",
+        "Browser pool is closed",
+        503,
+        true,
+      );
+    await this.refreshMemory();
+    for (const worker of [...this.workers]) {
+      if (worker.state === "healthy" && !worker.browser.isConnected())
+        this.markDead(worker);
+    }
     const available = this.workers
-      .filter((worker) => worker.browser.isConnected())
+      .filter(
+        (worker) =>
+          worker.state === "healthy" &&
+          worker.browser.isConnected() &&
+          worker.active < config.browserContextsPerWorker,
+      )
       .sort((a, b) => a.active - b.active)[0];
-    return (
-      available ??
-      (this.workers.length < config.browserPoolMax
-        ? this.launch()
-        : Promise.reject(
-            new OpenBrowseError(
-              "NO_BROWSER_CAPACITY",
-              "No browser worker is available",
-              503,
-              true,
-            ),
-          ))
-    );
+    if (available) return available;
+    if (this.workers.length + this.launching >= config.browserPoolMax)
+      throw new OpenBrowseError(
+        "NO_BROWSER_CAPACITY",
+        "No healthy browser worker has context capacity",
+        503,
+        true,
+      );
+    return this.launch();
   }
+
   private async launch(): Promise<Worker> {
-    const worker = {
-      browser: await chromium.launch({
+    const delay = this.nextLaunchAt - Date.now();
+    if (delay > 0)
+      throw new OpenBrowseError(
+        "NO_BROWSER_CAPACITY",
+        `Browser worker restart is backing off for ${delay}ms`,
+        503,
+        true,
+      );
+    this.launching++;
+    try {
+      const server = await chromium.launchServer({
         headless: true,
         chromiumSandbox: config.chromiumSandbox,
         args: chromiumExtensionArgs,
-      }),
-      jobs: 0,
-      createdAt: Date.now(),
-      active: 0,
-    };
-    this.workers.push(worker);
-    return worker;
+      });
+      let browser: Browser;
+      try {
+        browser = await chromium.connect(server.wsEndpoint());
+      } catch (error) {
+        await server.close().catch(() => undefined);
+        throw error;
+      }
+      const pid = server.process().pid;
+      if (!pid) {
+        await browser.close().catch(() => undefined);
+        await server.close().catch(() => undefined);
+        throw new Error("Browser server did not expose a process PID");
+      }
+      const worker: Worker = {
+        id: `wrk_${crypto.randomUUID().replaceAll("-", "")}`,
+        browser,
+        server,
+        pid,
+        jobs: 0,
+        createdAt: Date.now(),
+        active: 0,
+        failures: 0,
+        state: "healthy",
+        rssMb: 0,
+      };
+      server.on("close", () => this.markDead(worker));
+      browser.on("disconnected", () => {
+        if (worker.state === "healthy") {
+          worker.state = "draining";
+          void worker.server.close().catch(() => undefined);
+        }
+      });
+      this.workers.push(worker);
+      this.launchFailures = 0;
+      this.nextLaunchAt = 0;
+      await this.refreshMemory(true);
+      return worker;
+    } catch (error) {
+      this.launchFailures++;
+      this.nextLaunchAt =
+        Date.now() +
+        Math.min(
+          60000,
+          config.browserLaunchBackoffMs * 2 ** (this.launchFailures - 1),
+        );
+      throw error;
+    } finally {
+      this.launching--;
+    }
   }
-  private async recycle(worker: Worker): Promise<void> {
-    if (
-      worker.active > 0 ||
-      (worker.jobs < config.browserMaxJobs &&
-        Date.now() - worker.createdAt < config.browserMaxAgeMs &&
-        process.memoryUsage.rss() / 1024 / 1024 < config.browserRecycleRssMb)
-    )
-      return;
+
+  private recordFailure(worker: Worker): void {
+    worker.failures++;
+    if (worker.failures >= config.browserWorkerFailureLimit)
+      worker.state = "draining";
+  }
+
+  private markDead(worker: Worker): void {
+    if (worker.state === "dead") return;
+    worker.state = "dead";
     const index = this.workers.indexOf(worker);
     if (index >= 0) this.workers.splice(index, 1);
-    await worker.browser.close().catch(() => undefined);
+    void this.refreshMemory(true);
+    void this.replenish();
+  }
+
+  private async replenish(): Promise<void> {
+    if (
+      this.closed ||
+      this.workers.length + this.launching >= config.browserPoolMin ||
+      Date.now() < this.nextLaunchAt
+    )
+      return;
+    await this.launch().catch(() => undefined);
+  }
+
+  private async recycle(worker: Worker): Promise<void> {
+    if (
+      worker.jobs >= config.browserMaxJobs ||
+      Date.now() - worker.createdAt >= config.browserMaxAgeMs ||
+      worker.rssMb >= config.browserRecycleRssMb
+    )
+      worker.state = "draining";
+    if (worker.active > 0 || worker.state === "healthy") return;
+    const index = this.workers.indexOf(worker);
+    if (index >= 0) this.workers.splice(index, 1);
+    await worker.server.close().catch(() => undefined);
+    await this.refreshMemory(true);
+    await this.replenish();
   }
 }

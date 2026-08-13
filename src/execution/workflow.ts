@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { config } from "../config.js";
 import { OpenBrowseError } from "../errors.js";
 import { assertSafeUrl, normalizeUrl } from "../security.js";
@@ -132,21 +131,28 @@ export async function browserDownload(
       ]);
       const sourceUrl = download.url();
       await assertSafeUrl(sourceUrl, input.proxy?.allowedDomains);
-      const filePath = await download.path();
-      if (!filePath)
+      const stream = await download.createReadStream();
+      if (!stream)
         throw new OpenBrowseError(
           "RENDER_FAILED",
-          "Browser did not provide the downloaded file",
+          "Browser did not provide a readable download stream",
           422,
           true,
         );
-      const body = await readFile(filePath);
-      if (body.length > config.maxResponseBytes)
-        throw new OpenBrowseError(
-          "PAYLOAD_TOO_LARGE",
-          "Downloaded file exceeds the configured byte limit",
-          413,
-        );
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      for await (const chunk of stream) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        bytes += buffer.length;
+        if (bytes > config.maxResponseBytes)
+          throw new OpenBrowseError(
+            "PAYLOAD_TOO_LARGE",
+            "Downloaded file exceeds the configured byte limit",
+            413,
+          );
+        chunks.push(buffer);
+      }
+      const body = Buffer.concat(chunks, bytes);
       const filename =
         download
           .suggestedFilename()

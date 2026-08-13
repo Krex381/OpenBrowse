@@ -154,8 +154,9 @@ export function registerContentRoutes(input: {
       request.body,
     );
     const proxy = await resolveProxy(body.proxyId, requestKeyHash(request));
-    const scheduled = await queue.run(() =>
-      screenshot(pool, { ...body, ...(proxy ? { proxy } : {}) }),
+    const scheduled = await queue.run(
+      () => screenshot(pool, { ...body, ...(proxy ? { proxy } : {}) }),
+      "screenshot",
     );
     return sendBinary(
       reply,
@@ -179,14 +180,15 @@ export function registerContentRoutes(input: {
       }),
       request.body,
     );
-    const scheduled = await queue.run(() =>
-      screenshot(pool, {
+    const scheduled = await queue.run(
+      () => screenshot(pool, {
         url: body.url,
         format: body.options.type,
         fullPage: body.options.fullPage,
         quality: body.options.quality,
         ...(body.timeout ? { timeoutMs: body.timeout } : {}),
       }),
+      "screenshot",
     );
     return sendBinary(
       reply,
@@ -221,8 +223,9 @@ export function registerContentRoutes(input: {
       request.body,
     );
     const proxy = await resolveProxy(body.proxyId, requestKeyHash(request));
-    const scheduled = await queue.run(() =>
-      pdf(pool, { ...body, ...(proxy ? { proxy } : {}) }),
+    const scheduled = await queue.run(
+      () => pdf(pool, { ...body, ...(proxy ? { proxy } : {}) }),
+      "pdf",
     );
     return sendBinary(reply, scheduled.result, "application/pdf", request.id);
   });
@@ -249,12 +252,13 @@ export function registerContentRoutes(input: {
       }),
       request.body,
     );
-    const scheduled = await queue.run(() =>
-      pdf(pool, {
+    const scheduled = await queue.run(
+      () => pdf(pool, {
         url: body.url,
         ...body.options,
         ...(body.timeout ? { timeoutMs: body.timeout } : {}),
       }),
+      "pdf",
     );
     return sendBinary(reply, scheduled.result, "application/pdf", request.id);
   });

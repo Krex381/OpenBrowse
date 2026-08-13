@@ -156,8 +156,9 @@ export function registerAdminRoutes(input: {
             body.request,
           );
           const proxy = await resolveProxy(parsed.proxyId, job.ownerKeyHash);
-          const binary = await queue.run(() =>
-            screenshot(pool, { ...parsed, ...(proxy ? { proxy } : {}) }),
+          const binary = await queue.run(
+            () => screenshot(pool, { ...parsed, ...(proxy ? { proxy } : {}) }),
+            "screenshot",
           );
           const artifact = await storage.createArtifact(
             binary.result,
@@ -197,8 +198,9 @@ export function registerAdminRoutes(input: {
             body.request,
           );
           const proxy = await resolveProxy(parsed.proxyId, job.ownerKeyHash);
-          const binary = await queue.run(() =>
-            pdf(pool, { ...parsed, ...(proxy ? { proxy } : {}) }),
+          const binary = await queue.run(
+            () => pdf(pool, { ...parsed, ...(proxy ? { proxy } : {}) }),
+            "pdf",
           );
           const artifact = await storage.createArtifact(
             binary.result,
