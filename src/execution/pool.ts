@@ -37,6 +37,7 @@ export interface BrowserMemorySnapshot {
   browserRssMb: number;
   processTreeRssMb: number;
   containerRssMb?: number;
+  containerLimitMb?: number;
   admissionAuthority: MemoryAdmissionAuthority;
   totalRssMb: number;
   processTreesSupported: boolean;
@@ -157,7 +158,12 @@ export class BrowserPool {
         processTreeRssMb: admission.processTreeRssMb,
         ...(measurement.containerRssMb === undefined
           ? {}
-          : { containerRssMb: measurement.containerRssMb }),
+          : {
+              containerRssMb: measurement.containerRssMb,
+              ...(measurement.containerLimitMb === undefined
+                ? {}
+                : { containerLimitMb: measurement.containerLimitMb }),
+            }),
         admissionAuthority: admission.authority,
         totalRssMb: admission.rssMb,
         processTreesSupported: measurement.supported,

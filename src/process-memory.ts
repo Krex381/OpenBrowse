@@ -11,6 +11,7 @@ export interface BrowserMemoryMeasurement {
   supported: boolean;
   trees: Map<number, ProcessTreeMemory>;
   containerRssMb?: number;
+  containerLimitMb?: number;
 }
 
 export type MemoryAdmissionAuthority = "cgroup" | "process-tree" | "node";
@@ -86,6 +87,12 @@ async function linuxRssMb(pid: number): Promise<number> {
 }
 
 type CgroupMount = { root: string; mountPoint: string; version: 1 | 2; memory: boolean };
+type CgroupMemory = { usageMb: number; limitMb: number };
+
+// v1 represents an unlimited controller as a near-int64 maximum. Treat any
+// value above one PiB as unbounded: it belongs to a host/parent cgroup rather
+// than a practical workload envelope.
+const maximumScopedCgroupLimitMb = 1024 * 1024;
 
 function cgroupPathWithinMount(root: string, path: string): string | undefined {
   const normalizedRoot = posix.normalize(root);
@@ -133,7 +140,7 @@ export function cgroupMemoryPaths(cgroup: string, mountInfo: string): string[] {
   return [...paths];
 }
 
-async function cgroupRssMb(): Promise<number | undefined> {
+async function cgroupRssMb(): Promise<CgroupMemory | undefined> {
   let paths: string[];
   try {
     const [cgroup, mountInfo] = await Promise.all([
@@ -147,7 +154,15 @@ async function cgroupRssMb(): Promise<number | undefined> {
   for (const path of paths) {
     try {
       const value = Number((await readFile(path, "utf8")).trim());
-      if (Number.isFinite(value)) return mb(value);
+      if (!Number.isFinite(value)) continue;
+      const limitPath = path.endsWith("memory.current")
+        ? `${path.slice(0, -"memory.current".length)}memory.max`
+        : `${path.slice(0, -"memory.usage_in_bytes".length)}memory.limit_in_bytes`;
+      const limit = Number((await readFile(limitPath, "utf8")).trim());
+      if (!Number.isFinite(limit)) continue;
+      const limitMb = mb(limit);
+      if (limitMb <= 0 || limitMb >= maximumScopedCgroupLimitMb) continue;
+      return { usageMb: mb(value), limitMb };
     } catch {
       // Try the other hierarchy before falling back to process-tree RSS.
     }
@@ -166,7 +181,7 @@ export async function measureBrowserProcessTrees(
   if (process.platform !== "linux")
     return { supported: false, trees: new Map() };
   const roots = [...new Set(rootPids.filter((pid) => Number.isInteger(pid) && pid > 0))];
-  const [rows, containerRssMb] = await Promise.all([linuxProcesses(), cgroupRssMb()]);
+  const [rows, containerMemory] = await Promise.all([linuxProcesses(), cgroupRssMb()]);
   const children = new Map<number, number[]>();
   for (const row of rows) {
     const sibling = children.get(row.ppid) ?? [];
@@ -196,5 +211,14 @@ export async function measureBrowserProcessTrees(
       });
     }),
   );
-  return { supported: true, trees, ...(containerRssMb === undefined ? {} : { containerRssMb }) };
+  return {
+    supported: true,
+    trees,
+    ...(containerMemory === undefined
+      ? {}
+      : {
+          containerRssMb: containerMemory.usageMb,
+          containerLimitMb: containerMemory.limitMb,
+        }),
+  };
 }

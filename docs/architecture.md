@@ -21,8 +21,9 @@ in-flight requests are coalesced. Browser processes recycle according to age,
 job count, and per-worker process-tree RSS. Process-tree sums deliberately
 remain a recycling signal: they include Chromium renderers and utility
 processes even when their memory is shared. Queue admission has a different
-authority: on Linux containers it uses cgroup `memory.current`, the physical
-container charge. Outside a cgroup it falls back to the process-tree sum, then
+authority: on Linux containers it uses the physical cgroup charge only when
+the process has a finite cgroup memory limit. An unbounded host/parent cgroup
+is not a workload envelope, so it falls back to the process-tree sum, then
 Node RSS where `/proc` is unavailable. `/pressure` and `/metrics` expose both
 the admission value and the process-tree diagnostic so a long soak can detect
 divergence rather than hiding it.

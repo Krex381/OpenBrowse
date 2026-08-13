@@ -149,6 +149,9 @@ export function registerPublicRoutes(input: {
         ...(memory.containerRssMb === undefined
           ? {}
           : { containerRssMb: Number(memory.containerRssMb.toFixed(1)) }),
+        ...(memory.containerLimitMb === undefined
+          ? {}
+          : { containerLimitMb: Number(memory.containerLimitMb.toFixed(1)) }),
         processTreesSupported: memory.processTreesSupported,
         sampledAt: new Date(memory.sampledAt).toISOString(),
         softLimitMb: config.memorySoftMb,
