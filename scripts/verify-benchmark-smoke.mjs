@@ -1,7 +1,13 @@
 import { readFile } from "node:fs/promises";
 
 const file = process.argv[2] ?? "benchmark-smoke.json";
-const report = JSON.parse(await readFile(file, "utf8"));
+const raw = await readFile(file, "utf8");
+// `npm run … > file` includes npm's human-readable command preamble before
+// the runner's JSON. Keep the verifier usable both through npm and when the
+// benchmark script is invoked directly.
+const jsonStart = raw.indexOf("{");
+if (jsonStart < 0) throw new Error(`${file}: benchmark output did not contain a JSON report`);
+const report = JSON.parse(raw.slice(jsonStart));
 const errors = [];
 
 if (report.schemaVersion !== 1) errors.push("unexpected benchmark schema version");
