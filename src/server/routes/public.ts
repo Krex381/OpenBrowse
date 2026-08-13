@@ -130,7 +130,8 @@ export function registerPublicRoutes(input: {
     const browser = pool.stats();
     const memory = pool.memorySnapshot();
     reply.type("text/plain; version=0.0.4");
-    return `openbrowse_queue_depth ${stats.pending}\nopenbrowse_active_jobs ${stats.active}\nopenbrowse_memory_pressure ${stats.pressure === "normal" ? 0 : stats.pressure === "pressure" ? 1 : 2}\nopenbrowse_node_rss_megabytes ${memory.nodeRssMb.toFixed(1)}\nopenbrowse_browser_tree_rss_megabytes ${memory.browserRssMb.toFixed(1)}\nopenbrowse_effective_rss_megabytes ${memory.totalRssMb.toFixed(1)}\nopenbrowse_browser_processes ${browser.processes}\nopenbrowse_browser_contexts ${browser.busy}\nopenbrowse_browser_workers_healthy ${browser.healthy}\nopenbrowse_browser_workers_draining ${browser.draining}\nopenbrowse_browser_workers_starting ${browser.starting}\nopenbrowse_browser_worker_launches_total ${browser.launches}\nopenbrowse_browser_worker_crashes_total ${browser.crashes}\nopenbrowse_browser_worker_recycles_total ${browser.recycled}\nopenbrowse_browser_worker_replacements_total ${browser.replacements}\n`;
+    const authority = memory.admissionAuthority === "cgroup" ? 1 : memory.admissionAuthority === "process-tree" ? 2 : 3;
+    return `openbrowse_queue_depth ${stats.pending}\nopenbrowse_active_jobs ${stats.active}\nopenbrowse_memory_pressure ${stats.pressure === "normal" ? 0 : stats.pressure === "pressure" ? 1 : 2}\nopenbrowse_node_rss_megabytes ${memory.nodeRssMb.toFixed(1)}\nopenbrowse_browser_tree_rss_megabytes ${memory.browserRssMb.toFixed(1)}\nopenbrowse_process_tree_rss_megabytes ${memory.processTreeRssMb.toFixed(1)}\nopenbrowse_admission_rss_megabytes ${memory.totalRssMb.toFixed(1)}\nopenbrowse_memory_admission_authority ${authority}\nopenbrowse_browser_processes ${browser.processes}\nopenbrowse_browser_contexts ${browser.busy}\nopenbrowse_browser_workers_healthy ${browser.healthy}\nopenbrowse_browser_workers_draining ${browser.draining}\nopenbrowse_browser_workers_starting ${browser.starting}\nopenbrowse_browser_worker_launches_total ${browser.launches}\nopenbrowse_browser_worker_crashes_total ${browser.crashes}\nopenbrowse_browser_worker_recycles_total ${browser.recycled}\nopenbrowse_browser_worker_replacements_total ${browser.replacements}\n`;
   });
   app.get("/pressure", async () => {
     await pool.refreshMemory();
@@ -141,8 +142,10 @@ export function registerPublicRoutes(input: {
       pressure: stats.pressure,
       memory: {
         rssMb: Number(memory.totalRssMb.toFixed(1)),
+        admissionAuthority: memory.admissionAuthority,
         nodeRssMb: Number(memory.nodeRssMb.toFixed(1)),
         browserRssMb: Number(memory.browserRssMb.toFixed(1)),
+        processTreeRssMb: Number(memory.processTreeRssMb.toFixed(1)),
         ...(memory.containerRssMb === undefined
           ? {}
           : { containerRssMb: Number(memory.containerRssMb.toFixed(1)) }),

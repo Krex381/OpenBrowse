@@ -12,10 +12,44 @@ export interface BrowserMemoryMeasurement {
   containerRssMb?: number;
 }
 
+export type MemoryAdmissionAuthority = "cgroup" | "process-tree" | "node";
+
+export interface AdmissionMemory {
+  authority: MemoryAdmissionAuthority;
+  rssMb: number;
+  processTreeRssMb: number;
+}
+
 type ProcessRow = { pid: number; ppid: number };
 
 function mb(bytes: number): number {
   return bytes / 1024 / 1024;
+}
+
+/**
+ * Selects the memory value used to admit more work. Per-process RSS sums are
+ * intentionally retained for worker recycling, but they can count shared
+ * Chromium pages more than once. A cgroup's `memory.current` is the physical
+ * container charge and therefore wins whenever the runtime exposes it.
+ */
+export function admissionMemory(input: {
+  nodeRssMb: number;
+  browserTreeRssMb: number;
+  containerRssMb?: number;
+  processTreesSupported: boolean;
+}): AdmissionMemory {
+  const processTreeRssMb = input.nodeRssMb + input.browserTreeRssMb;
+  if (input.containerRssMb !== undefined)
+    return {
+      authority: "cgroup",
+      rssMb: input.containerRssMb,
+      processTreeRssMb,
+    };
+  return {
+    authority: input.processTreesSupported ? "process-tree" : "node",
+    rssMb: input.processTreesSupported ? processTreeRssMb : input.nodeRssMb,
+    processTreeRssMb,
+  };
 }
 
 async function linuxProcesses(): Promise<ProcessRow[]> {

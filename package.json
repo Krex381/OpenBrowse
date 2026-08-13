@@ -24,7 +24,9 @@
     "test:all": "npm run test && npm run test:integration && npm run test:raw-bridge",
     "verify:new-features": "node scripts/verify-new-features.mjs",
     "verify:docker": "node scripts/verify-docker.mjs",
-    "benchmark:soak": "node scripts/soak-benchmark.mjs"
+    "verify:benchmark-smoke": "node scripts/verify-benchmark-smoke.mjs",
+    "benchmark:soak": "node scripts/soak-benchmark.mjs",
+    "benchmark:corpus": "node scripts/extraction-corpus-benchmark.mjs"
   },
   "dependencies": {
     "@fastify/swagger": "^9.4.0",

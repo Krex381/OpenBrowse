@@ -7,7 +7,11 @@ import {
 } from "playwright";
 import { chromiumExtensionArgs, config } from "../config.js";
 import { OpenBrowseError } from "../errors.js";
-import { measureBrowserProcessTrees } from "../process-memory.js";
+import {
+  admissionMemory,
+  measureBrowserProcessTrees,
+  type MemoryAdmissionAuthority,
+} from "../process-memory.js";
 import { assertSafeUrl } from "../security.js";
 import type { StoredProxy } from "../storage.js";
 import { defaultProxySettings, proxySettings } from "./shared.js";
@@ -31,7 +35,9 @@ interface Worker {
 export interface BrowserMemorySnapshot {
   nodeRssMb: number;
   browserRssMb: number;
+  processTreeRssMb: number;
   containerRssMb?: number;
+  admissionAuthority: MemoryAdmissionAuthority;
   totalRssMb: number;
   processTreesSupported: boolean;
   sampledAt: number;
@@ -70,6 +76,8 @@ export class BrowserPool {
   private memory: BrowserMemorySnapshot = {
     nodeRssMb: nodeRssMb(),
     browserRssMb: 0,
+    processTreeRssMb: nodeRssMb(),
+    admissionAuthority: process.platform === "linux" ? "process-tree" : "node",
     totalRssMb: nodeRssMb(),
     processTreesSupported: process.platform === "linux",
     sampledAt: Date.now(),
@@ -135,14 +143,23 @@ export class BrowserPool {
         browserRssMb += worker.rssMb;
       }
       const nodeRss = nodeRssMb();
-      const processRss = nodeRss + browserRssMb;
-      this.memory = {
+      const admission = admissionMemory({
         nodeRssMb: nodeRss,
-        browserRssMb,
+        browserTreeRssMb: browserRssMb,
         ...(measurement.containerRssMb === undefined
           ? {}
           : { containerRssMb: measurement.containerRssMb }),
-        totalRssMb: Math.max(processRss, measurement.containerRssMb ?? 0),
+        processTreesSupported: measurement.supported,
+      });
+      this.memory = {
+        nodeRssMb: nodeRss,
+        browserRssMb,
+        processTreeRssMb: admission.processTreeRssMb,
+        ...(measurement.containerRssMb === undefined
+          ? {}
+          : { containerRssMb: measurement.containerRssMb }),
+        admissionAuthority: admission.authority,
+        totalRssMb: admission.rssMb,
         processTreesSupported: measurement.supported,
         sampledAt: Date.now(),
       };

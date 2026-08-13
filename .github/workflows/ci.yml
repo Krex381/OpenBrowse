@@ -30,6 +30,7 @@ jobs:
           OPENBROWSE_BENCHMARK_TARGET: https://example.com
           OPENBROWSE_BENCHMARK_REQUESTS: "20"
           OPENBROWSE_BENCHMARK_CONCURRENCY: "2"
+      - run: npm run verify:benchmark-smoke -- benchmark-smoke.json
       - uses: actions/upload-artifact@v4
         with:
           name: benchmark-smoke

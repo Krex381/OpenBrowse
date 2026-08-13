@@ -186,7 +186,9 @@ synthetic capacity claims. The soak runner mixes four HTTP-first requests with
 one forced browser render, reports p50/p95 latency, failures, worker state,
 and Node, Chromium-tree, and cgroup memory snapshots. Long-running mode also
 records periodic snapshots, so RSS growth is visible instead of inferred from
-only the start and end of a test.
+only the start and end of a test. In a Linux container, admission uses the
+cgroup charge; process-tree RSS remains a recycling diagnostic and is reported
+alongside it, including peak divergence and recycling transitions.
 
 ```bash
 export OPENBROWSE_BENCHMARK_API_KEY="$OPENBROWSE_API_KEY"
@@ -213,6 +215,11 @@ container settings, target characteristics, report schema, and publication
 criteria. Capacity numbers belong in a dated report with its exact
 configuration and raw JSON; the repository deliberately does not substitute
 made-up figures for that evidence.
+
+For extraction quality, use the assertion-backed 100–500 page
+[corpus protocol](docs/benchmarks/README.md#extraction-corpus-fidelity). It
+tests the deployed `auto` path across real authorised pages and reports every
+failed content assertion instead of inferring fidelity from request success.
 
 ## License and notices
 

@@ -35,6 +35,10 @@ done
 The runner caps retained latency samples with reservoir sampling, so a long run
 does not itself consume unbounded memory.
 
+The short Docker smoke in GitHub Actions validates that the resulting report
+used cgroup admission and contains memory samples. It is a telemetry contract,
+not a substitute for the 1 h / 6 h / 24 h runs above.
+
 ## Publication criteria
 
 A published result must include the raw JSON, OpenBrowse commit SHA, container
@@ -44,11 +48,54 @@ limits, machine/host details, target description, and test date. Report:
 | --- | --- |
 | HTTP/browser mix and successful requests | `workloads` |
 | p50/p95 latency | `workloads.*.p50Ms` and `p95Ms` |
-| Peak and idle RSS | `memory.samples` and `memory.after` |
+| Peak and idle RSS | `memory.peakAdmissionRssMb`, `memory.samples`, and `memory.after` |
+| Memory authority and RSS divergence | `memory.admissionAuthorities`, `peakContainerRssMb`, and `peakProcessTreeRssMb` |
 | OOMs and browser recovery | container/runtime logs plus `browserWorkers.*.crashes` and `replacements` |
+| Recycling activity | `workerTransitions.recycled` and `workerTransitions.replacements` |
 | Request and sampling failures | `failures` |
 
 Do not publish a capacity number when the report has failures that have not
 been explained, missing memory samples, an unrecorded configuration, or a
 target that changed behaviour during the run. This repository contains the
 runner and protocol, not synthetic benchmark figures.
+
+## Extraction corpus fidelity
+
+Latency and worker health do not prove that extraction preserved the page. Run
+an assertion-backed corpus of 100–500 pages across the content shapes you
+support: news, documentation, blogs, product pages, and client-rendered apps.
+Only include public pages that you own or are authorised to test; record a
+stable, human-reviewed expectation for each one. The runner sends each page
+through the deployed `/v1/fetch` `auto` path and fails if any page response or
+assertion fails.
+
+Start from [`extraction-corpus.example.json`](extraction-corpus.example.json),
+copy it outside the repository if it contains private targets, and expand it
+to the required corpus size:
+
+```json
+{
+  "id": "product-page-017",
+  "url": "https://www.example.com/product/017",
+  "expect": {
+    "markdownIncludes": ["Product name", "Specifications"],
+    "markdownExcludes": ["Cookie settings"],
+    "minimumMarkdownChars": 600,
+    "minimumLinks": 3
+  }
+}
+```
+
+```bash
+export OPENBROWSE_BENCHMARK_API_KEY="$OPENBROWSE_API_KEY"
+export OPENBROWSE_CORPUS_FILE=/secure/path/extraction-corpus.json
+export OPENBROWSE_CORPUS_CONCURRENCY=3
+npm run benchmark:corpus > extraction-corpus-result.json
+```
+
+The default bounds enforce 100–500 pages. For a one-page wiring check only,
+set `OPENBROWSE_CORPUS_MIN_PAGES=1`; do not treat that as fidelity evidence.
+Publish the corpus revision, target authorisation, failed assertions, and raw
+JSON with any extraction-quality claim. `pagePassRate` and
+`assertionPassRate` measure the supplied checks; they are not a substitute for
+human review of a sample from every content category.

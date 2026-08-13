@@ -11,6 +11,24 @@ afterAll(async () => {
 });
 
 describe("HTTP-first execution", () => {
+  it("reports the distinct memory admission and diagnostic values", async () => {
+    const pressure = await services.app.inject({ method: "GET", url: "/pressure" });
+    expect(pressure.statusCode).toBe(200);
+    const memory = pressure.json().memory as {
+      rssMb: number;
+      processTreeRssMb: number;
+      admissionAuthority: string;
+    };
+    expect(memory.rssMb).toBeGreaterThan(0);
+    expect(memory.processTreeRssMb).toBeGreaterThan(0);
+    expect(["cgroup", "process-tree", "node"]).toContain(memory.admissionAuthority);
+
+    const metrics = await services.app.inject({ method: "GET", url: "/metrics" });
+    expect(metrics.body).toContain("openbrowse_admission_rss_megabytes");
+    expect(metrics.body).toContain("openbrowse_process_tree_rss_megabytes");
+    expect(metrics.body).toContain("openbrowse_memory_admission_authority");
+  });
+
   it("serves the public product landing page with a restrictive CSP", async () => {
     const response = await services.app.inject({
       method: "GET",

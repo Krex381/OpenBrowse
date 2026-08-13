@@ -98,6 +98,21 @@ function formatSummary(summary) {
   };
 }
 
+function peak(samples, select) {
+  return Math.max(0, ...samples.map(select).filter(Number.isFinite));
+}
+
+function workerDelta(before, after) {
+  const first = before ?? {};
+  const last = after ?? {};
+  return {
+    launches: Math.max(0, (last.launches ?? 0) - (first.launches ?? 0)),
+    crashes: Math.max(0, (last.crashes ?? 0) - (first.crashes ?? 0)),
+    recycled: Math.max(0, (last.recycled ?? 0) - (first.recycled ?? 0)),
+    replacements: Math.max(0, (last.replacements ?? 0) - (first.replacements ?? 0)),
+  };
+}
+
 const before = await pressure();
 const startedAt = new Date().toISOString();
 const started = Date.now();
@@ -152,6 +167,12 @@ memorySamples.push({
   browserWorkers: workerSnapshot(after),
 });
 const all = Object.values(summaries).reduce((total, summary) => total + summary.requests, 0);
+const admissionAuthorities = [...new Set(memorySamples
+  .map((sample) => sample.memory?.admissionAuthority)
+  .filter(Boolean))];
+const peakAdmissionRssMb = peak(memorySamples, (sample) => sample.memory?.rssMb);
+const peakProcessTreeRssMb = peak(memorySamples, (sample) => sample.memory?.processTreeRssMb);
+const peakContainerRssMb = peak(memorySamples, (sample) => sample.memory?.containerRssMb);
 console.log(
   JSON.stringify(
     {
@@ -165,8 +186,17 @@ console.log(
       durationMs,
       requestsPerSecond: Number((all / (durationMs / 1000)).toFixed(2)),
       workloads: { http: formatSummary(summaries.http), browser: formatSummary(summaries.browser) },
-      memory: { before: before.memory, after: after.memory, samples: memorySamples },
+      memory: {
+        before: before.memory,
+        after: after.memory,
+        samples: memorySamples,
+        admissionAuthorities,
+        peakAdmissionRssMb: Number(peakAdmissionRssMb.toFixed(1)),
+        ...(peakProcessTreeRssMb ? { peakProcessTreeRssMb: Number(peakProcessTreeRssMb.toFixed(1)) } : {}),
+        ...(peakContainerRssMb ? { peakContainerRssMb: Number(peakContainerRssMb.toFixed(1)) } : {}),
+      },
       browserWorkers: { before: workerSnapshot(before), after: workerSnapshot(after) },
+      workerTransitions: workerDelta(workerSnapshot(before), workerSnapshot(after)),
       failures,
     },
     null,

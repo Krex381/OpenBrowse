@@ -18,7 +18,24 @@ selector, delay, navigation state, network idle, or custom stability bounds.
 SQLite stores metadata in WAL mode. The filesystem backs artifacts and the
 content-addressed cache. An in-memory LRU handles hot responses and identical
 in-flight requests are coalesced. Browser processes recycle according to age,
-job count, and memory pressure.
+job count, and per-worker process-tree RSS. Process-tree sums deliberately
+remain a recycling signal: they include Chromium renderers and utility
+processes even when their memory is shared. Queue admission has a different
+authority: on Linux containers it uses cgroup `memory.current`, the physical
+container charge. Outside a cgroup it falls back to the process-tree sum, then
+Node RSS where `/proc` is unavailable. `/pressure` and `/metrics` expose both
+the admission value and the process-tree diagnostic so a long soak can detect
+divergence rather than hiding it.
+
+## Deployment boundary
+
+OpenBrowse is intentionally a single-node service. SQLite metadata, local
+artifacts, the in-process admission queue, and live browser/session ownership
+are local to one instance. Run one replica per independent workload or place
+it behind a routing layer with explicit affinity; do not use round-robin
+replicas for a single live session. Distributed queueing, shared artifact
+storage, and cross-node session coordination are separate operator systems,
+not implied by this deployment.
 
 Persistent sessions store encrypted browser state. Replays and recordings are
 authenticated artifacts. All retained resources are scoped to the API key that
