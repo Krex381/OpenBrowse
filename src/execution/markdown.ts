@@ -2,6 +2,44 @@ import { load, type CheerioAPI } from "cheerio";
 import type { AnyNode } from "domhandler";
 
 const ignored = "script,style,noscript,template,svg,canvas,iframe,form";
+const articleCandidates = [
+  "article",
+  "main",
+  "[role='main']",
+  "[itemprop='articleBody']",
+  "[itemtype*='Article']",
+  ".article",
+  ".post",
+  ".entry-content",
+  "[class*='article']",
+  "[class*='post']",
+  "[class*='entry-content']",
+  "[class*='story']",
+].join(",");
+const articleSignals = ["article", "articlebody", "newsarticle", "post", "entry-content", "story"];
+const noiseSignals = [
+  "audio",
+  "advert",
+  "aside",
+  "breadcrumb",
+  "comment",
+  "footer",
+  "menu",
+  "most-read",
+  "navigation",
+  "newsletter",
+  "player",
+  "recommend",
+  "related",
+  "share",
+  "sidebar",
+  "social",
+];
+const noiseTextPatterns = [
+  /google[-\s]?(?:quelle|source)/i,
+  /(?:mehr|more)\s+[^\n]{0,48}\s+(?:artikel|articles)/i,
+];
+const paywallPattern = /(?:weiterlesen\s+mit\s+(?:ihrem\s+)?digitalen\s+zugang|paywall|subscribe\s+to\s+continue|sign\s+in\s+to\s+continue)/i;
 const blocks = new Set([
   "article",
   "aside",
@@ -41,13 +79,110 @@ function tagName(element: AnyNode): string {
   return value.toLowerCase();
 }
 
-function mainContent($: CheerioAPI): AnyNode | undefined {
-  const candidates = $("article, main, [role='main'], .article, .post, .entry-content")
+function elementMetadata($: CheerioAPI, element: AnyNode): string {
+  return [
+    tagName(element),
+    $(element).attr("id") ?? "",
+    $(element).attr("class") ?? "",
+    $(element).attr("role") ?? "",
+    $(element).attr("itemprop") ?? "",
+    $(element).attr("itemtype") ?? "",
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function hasAny(value: string, signals: readonly string[]): boolean {
+  return signals.some((signal) => value.includes(signal));
+}
+
+function isNoiseElement($: CheerioAPI, element: AnyNode): boolean {
+  const name = tagName(element);
+  if (["nav", "footer", "aside"].includes(name)) return true;
+  if (name === "header" && $(element).find("h1").length === 0) return true;
+  const metadata = elementMetadata($, element);
+  const text = clean($(element).text());
+  return (
+    hasAny(metadata, noiseSignals) ||
+    (text.length <= 320 && noiseTextPatterns.some((pattern) => pattern.test(text)))
+  );
+}
+
+function candidateScore($: CheerioAPI, element: AnyNode): number {
+  const text = clean($(element).text());
+  if (text.length < 120) return Number.NEGATIVE_INFINITY;
+  const metadata = elementMetadata($, element);
+  const paragraphText = $(element)
+    .find("p")
     .toArray()
-    .map((element) => ({ element, score: $(element).text().trim().length }))
-    .filter((candidate) => candidate.score >= 160)
-    .sort((a, b) => b.score - a.score);
-  return candidates[0]?.element ?? $("body").get(0);
+    .reduce((total, paragraph) => total + clean($(paragraph).text()).length, 0);
+  const links = $(element)
+    .find("a")
+    .toArray()
+    .reduce((total, link) => total + clean($(link).text()).length, 0);
+  const linkDensity = links / Math.max(1, text.length);
+  const semanticBonus =
+    (tagName(element) === "article" ? 2_000 : 0) +
+    (metadata.includes("articlebody") ? 2_400 : 0) +
+    (hasAny(metadata, articleSignals) ? 1_200 : 0) +
+    ($(element).find("h1").length > 0 ? 1_600 : 0) +
+    ($(element).find("h2").length > 0 ? 120 : 0);
+  const directNoisePenalty = hasAny(metadata, noiseSignals) ? 3_000 : 0;
+  const descendantNoisePenalty = $(element)
+    .find("*")
+    .toArray()
+    .filter((child) => isNoiseElement($, child))
+    .reduce((total, child) => total + Math.min(600, clean($(child).text()).length), 0);
+  return (
+    Math.min(9_000, text.length) * 0.25 +
+    Math.min(6_000, paragraphText) * 0.9 +
+    $(element).find("p").length * 140 +
+    semanticBonus -
+    linkDensity * text.length * 1.4 -
+    directNoisePenalty -
+    descendantNoisePenalty
+  );
+}
+
+function mainContent($: CheerioAPI): AnyNode | undefined {
+  const candidates = new Set<AnyNode>($(articleCandidates).toArray());
+  for (const heading of $("h1").toArray()) {
+    for (const ancestor of $(heading).parents().toArray().slice(0, 6)) {
+      if (["body", "html"].includes(tagName(ancestor))) continue;
+      candidates.add(ancestor);
+    }
+  }
+  const best = [...candidates]
+    .map((element) => ({ element, score: candidateScore($, element) }))
+    .filter((candidate) => Number.isFinite(candidate.score))
+    .sort((left, right) => right.score - left.score)[0];
+  return best?.element ?? $("body").get(0);
+}
+
+function removeNoise($: CheerioAPI, root: AnyNode): void {
+  $(root)
+    .find("*")
+    .toArray()
+    .filter((element) => isNoiseElement($, element))
+    .forEach((element) => $(element).remove());
+}
+
+function trimAtPaywall($: CheerioAPI, root: AnyNode): boolean {
+  const marker = $(root)
+    .find("*")
+    .toArray()
+    .filter((element) => paywallPattern.test(clean($(element).text())))
+    .sort((left, right) => clean($(left).text()).length - clean($(right).text()).length)[0];
+  if (!marker) return false;
+  let boundary = marker;
+  while (true) {
+    const parent = $(boundary).parent().get(0);
+    if (!parent || parent === root || $(parent).children().length !== 1) break;
+    boundary = parent;
+  }
+  $(boundary).nextAll().remove();
+  $(boundary).remove();
+  return true;
 }
 
 function absoluteUrl(value: string, baseUrl: string): string | undefined {
@@ -160,14 +295,32 @@ function block($: CheerioAPI, element: AnyNode, baseUrl: string): string {
   return clean(children);
 }
 
-/** Converts the readable document region into stable, LLM-ready Markdown. */
-export function htmlToMarkdown(html: string, baseUrl: string): string {
+export interface ReadableDocument {
+  html: string;
+  paywallDetected: boolean;
+}
+
+/** Isolates the highest-quality article region before output conversion. */
+export function readableContentHtml(html: string): ReadableDocument {
   const $ = load(html);
   $(ignored).remove();
-  $("nav,footer,aside,[role='navigation'],[role='complementary']").remove();
   const root = mainContent($);
+  if (!root) return { html: "", paywallDetected: false };
+  const clone = $(root).clone().get(0);
+  if (!clone) return { html: "", paywallDetected: false };
+  removeNoise($, clone);
+  const paywallDetected = trimAtPaywall($, clone);
+  return { html: $.html(clone), paywallDetected };
+}
+
+/** Converts the readable document region into stable, LLM-ready Markdown. */
+export function htmlToMarkdown(html: string, baseUrl: string): string {
+  const readable = readableContentHtml(html);
+  if (!readable.html) return "";
+  const $ = load(readable.html);
+  const root = $("body").get(0);
   if (!root) return "";
-  return clean(
+  const markdown = clean(
     $(root)
       .contents()
       .toArray()
@@ -177,4 +330,7 @@ export function htmlToMarkdown(html: string, baseUrl: string): string {
       .filter(Boolean)
       .join("\n\n"),
   );
+  return readable.paywallDetected
+    ? clean(`${markdown}\n\n> Paywall notice: Further article text requires access.`)
+    : markdown;
 }

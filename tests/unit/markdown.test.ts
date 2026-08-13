@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { htmlToMarkdown } from "../../src/execution/markdown.js";
+import { htmlToMarkdown, readableContentHtml } from "../../src/execution/markdown.js";
 
 describe("HTML to Markdown extraction", () => {
   it("keeps semantic headings, links, lists, code, and tables", () => {
@@ -31,5 +31,37 @@ describe("HTML to Markdown extraction", () => {
     expect(
       htmlToMarkdown("<body><h2>Status</h2><p>Everything is ready.</p></body>", "https://example.com"),
     ).toBe("## Status\n\nEverything is ready.");
+  });
+
+  it("isolates article content, removes chrome, and stops at an access boundary", () => {
+    const html = `<!doctype html><body>
+      <nav><a href="/news">Latest news</a></nav>
+      <div class="container">
+        <div class="kmm-article-box">
+          <h1>Public investigation</h1>
+          <p>The accessible introduction explains the allegations.</p>
+          <div class="audio-player">Previous ten seconds</div>
+          <a href="https://google.com/preferences">Add as preferred Google source</a>
+          <div>Weiterlesen mit Ihrem digitalen Zugang</div>
+          <section class="related-stories"><a href="/other">Related story</a></section>
+        </div>
+        <aside class="sidebar"><a href="/popular">Most read</a></aside>
+      </div>
+      <footer><a href="/privacy">Privacy</a></footer>
+    </body>`;
+    const readable = readableContentHtml(html);
+    expect(readable.paywallDetected).toBe(true);
+    expect(readable.html).toContain("Public investigation");
+    expect(readable.html).not.toContain("Related story");
+    expect(readable.html).not.toContain("Most read");
+    expect(readable.html).not.toContain("Privacy");
+    expect(readable.html).not.toContain("Previous ten seconds");
+    expect(readable.html).not.toContain("preferred Google source");
+
+    const markdown = htmlToMarkdown(html, "https://example.com/article");
+    expect(markdown).toContain("# Public investigation");
+    expect(markdown).toContain("accessible introduction");
+    expect(markdown).toContain("Paywall notice");
+    expect(markdown).not.toContain("Related story");
   });
 });

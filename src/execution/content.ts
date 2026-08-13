@@ -2,7 +2,7 @@ import { load } from "cheerio";
 import { OpenBrowseError } from "../errors.js";
 import { assertSafeUrl, normalizeUrl } from "../security.js";
 import { httpFetch } from "./http.js";
-import { htmlToMarkdown } from "./markdown.js";
+import { htmlToMarkdown, readableContentHtml } from "./markdown.js";
 import { BrowserPool } from "./pool.js";
 import { appearsClientRendered, timeout } from "./shared.js";
 import type { BrowserWait, FetchInput, FetchResult, Output } from "./types.js";
@@ -224,8 +224,10 @@ export function transform(
   outputs: Output[],
 ): Pick<FetchResult, "html" | "markdown" | "links"> {
   if (!result.html) return {};
-  const $ = load(result.html);
-  $("script,style,noscript,template").remove();
+  const readable = outputs.includes("markdown") || outputs.includes("links")
+    ? readableContentHtml(result.html)
+    : undefined;
+  const $ = load(readable?.html ?? "");
   const answer: Pick<FetchResult, "html" | "markdown" | "links"> = {};
   if (outputs.includes("html")) answer.html = result.html;
   if (outputs.includes("markdown"))
