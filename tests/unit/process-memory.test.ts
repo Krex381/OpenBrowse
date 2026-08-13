@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { admissionMemory } from "../../src/process-memory.js";
+import { admissionMemory, cgroupMemoryPaths } from "../../src/process-memory.js";
 
 describe("admission memory authority", () => {
   it("uses the cgroup charge instead of overcounted process RSS", () => {
@@ -28,5 +28,19 @@ describe("admission memory authority", () => {
         processTreesSupported: false,
       }),
     ).toEqual({ authority: "node", rssMb: 120, processTreeRssMb: 400 });
+  });
+
+  it("resolves cgroup v1 and v2 accounting paths from the process namespace", () => {
+    const v2 = cgroupMemoryPaths(
+      "0::/docker/abc\n",
+      "31 24 0:28 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+    );
+    expect(v2).toContain("/sys/fs/cgroup/docker/abc/memory.current");
+
+    const v1 = cgroupMemoryPaths(
+      "11:memory:/docker/abc\n",
+      "31 24 0:28 / /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory\n",
+    );
+    expect(v1).toContain("/sys/fs/cgroup/memory/docker/abc/memory.usage_in_bytes");
   });
 });

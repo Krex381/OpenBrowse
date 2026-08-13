@@ -1,4 +1,5 @@
 import { readdir, readFile } from "node:fs/promises";
+import { posix } from "node:path";
 
 export interface ProcessTreeMemory {
   rootPid: number;
@@ -84,13 +85,66 @@ async function linuxRssMb(pid: number): Promise<number> {
   }
 }
 
+type CgroupMount = { root: string; mountPoint: string; version: 1 | 2; memory: boolean };
+
+function cgroupPathWithinMount(root: string, path: string): string | undefined {
+  const normalizedRoot = posix.normalize(root);
+  const normalizedPath = posix.normalize(path);
+  if (normalizedRoot !== "/" && normalizedPath !== normalizedRoot && !normalizedPath.startsWith(`${normalizedRoot}/`))
+    return undefined;
+  return normalizedRoot === "/" ? normalizedPath.slice(1) : normalizedPath.slice(normalizedRoot.length).replace(/^\//, "");
+}
+
+/** Maps `/proc` cgroup metadata to candidate accounting files across v1/v2. */
+export function cgroupMemoryPaths(cgroup: string, mountInfo: string): string[] {
+  const groups = cgroup.split("\n").flatMap((line) => {
+    const [id, controllers, path] = line.trim().split(":", 3);
+    return id !== undefined && controllers !== undefined && path !== undefined
+      ? [{ controllers: controllers.split(","), path }]
+      : [];
+  });
+  const mounts = mountInfo.split("\n").flatMap((line): CgroupMount[] => {
+    const [before, after] = line.split(" - ", 2);
+    if (!before || !after) return [];
+    const fields = before.split(" ");
+    const filesystem = after.split(" ")[0];
+    const root = fields[3];
+    const mountPoint = fields[4];
+    if (!root || !mountPoint) return [];
+    if (filesystem === "cgroup2") return [{ root, mountPoint, version: 2, memory: true }];
+    if (filesystem !== "cgroup") return [];
+    const options = `${before} ${after}`.split(",");
+    return [{ root, mountPoint, version: 1, memory: options.includes("memory") }];
+  });
+  const paths = new Set<string>();
+  for (const group of groups) {
+    const version: 1 | 2 = group.controllers.length === 1 && group.controllers[0] === "" ? 2 : 1;
+    const needsMemory = version === 1;
+    for (const mount of mounts) {
+      if (mount.version !== version || (needsMemory && !mount.memory)) continue;
+      const relative = cgroupPathWithinMount(mount.root, group.path);
+      if (relative === undefined) continue;
+      paths.add(posix.join(mount.mountPoint, relative, version === 2 ? "memory.current" : "memory.usage_in_bytes"));
+    }
+  }
+  // Root-layout fallbacks cover minimal containers where /proc is unavailable.
+  paths.add("/sys/fs/cgroup/memory.current");
+  paths.add("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+  return [...paths];
+}
+
 async function cgroupRssMb(): Promise<number | undefined> {
-  for (const path of [
-    // cgroup v2
-    "/sys/fs/cgroup/memory.current",
-    // cgroup v1, still common on hosted Linux runners and older kernels.
-    "/sys/fs/cgroup/memory/memory.usage_in_bytes",
-  ]) {
+  let paths: string[];
+  try {
+    const [cgroup, mountInfo] = await Promise.all([
+      readFile("/proc/self/cgroup", "utf8"),
+      readFile("/proc/self/mountinfo", "utf8"),
+    ]);
+    paths = cgroupMemoryPaths(cgroup, mountInfo);
+  } catch {
+    paths = cgroupMemoryPaths("", "");
+  }
+  for (const path of paths) {
     try {
       const value = Number((await readFile(path, "utf8")).trim());
       if (Number.isFinite(value)) return mb(value);
