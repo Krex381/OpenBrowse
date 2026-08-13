@@ -24,6 +24,17 @@ jobs:
           OPENBROWSE_CHROMIUM_SANDBOX: "true"
       - run: for i in {1..60}; do curl --fail --silent http://127.0.0.1:3000/healthz && exit 0; sleep 1; done; exit 1
       - run: npm run verify:docker
+      - run: npm run benchmark:soak > benchmark-smoke.json
+        env:
+          OPENBROWSE_BENCHMARK_API_KEY: dev-key
+          OPENBROWSE_BENCHMARK_TARGET: https://example.com
+          OPENBROWSE_BENCHMARK_REQUESTS: "20"
+          OPENBROWSE_BENCHMARK_CONCURRENCY: "2"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-smoke
+          path: benchmark-smoke.json
+          if-no-files-found: error
       - run: "! docker compose logs --no-color openbrowse | grep -- '--no-sandbox'"
         env:
           OPENBROWSE_API_KEYS: dev-key

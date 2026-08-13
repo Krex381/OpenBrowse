@@ -3,12 +3,24 @@ const apiKey = process.env.OPENBROWSE_BENCHMARK_API_KEY;
 const target = process.env.OPENBROWSE_BENCHMARK_TARGET ?? "https://example.com";
 const requests = Number(process.env.OPENBROWSE_BENCHMARK_REQUESTS ?? 100);
 const concurrency = Number(process.env.OPENBROWSE_BENCHMARK_CONCURRENCY ?? 4);
+const durationSeconds = process.env.OPENBROWSE_BENCHMARK_DURATION_SECONDS === undefined
+  ? undefined
+  : Number(process.env.OPENBROWSE_BENCHMARK_DURATION_SECONDS);
+const sampleIntervalSeconds = Number(process.env.OPENBROWSE_BENCHMARK_SAMPLE_INTERVAL_SECONDS ?? 60);
+const maxLatencySamples = 20_000;
 
 if (!apiKey) throw new Error("OPENBROWSE_BENCHMARK_API_KEY is required");
 if (!Number.isInteger(requests) || requests < 1 || requests > 100000)
   throw new Error("OPENBROWSE_BENCHMARK_REQUESTS must be an integer from 1 to 100000");
 if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 100)
   throw new Error("OPENBROWSE_BENCHMARK_CONCURRENCY must be an integer from 1 to 100");
+if (
+  durationSeconds !== undefined &&
+  (!Number.isInteger(durationSeconds) || durationSeconds < 1 || durationSeconds > 86400)
+)
+  throw new Error("OPENBROWSE_BENCHMARK_DURATION_SECONDS must be an integer from 1 to 86400");
+if (!Number.isInteger(sampleIntervalSeconds) || sampleIntervalSeconds < 1 || sampleIntervalSeconds > 3600)
+  throw new Error("OPENBROWSE_BENCHMARK_SAMPLE_INTERVAL_SECONDS must be an integer from 1 to 3600");
 
 const headers = {
   authorization: `Bearer ${apiKey}`,
@@ -19,6 +31,10 @@ async function pressure() {
   const response = await fetch(`${gateway}/pressure`);
   if (!response.ok) throw new Error(`/pressure returned ${response.status}`);
   return response.json();
+}
+
+function workerSnapshot(snapshot) {
+  return snapshot.browserWorkers ?? snapshot.sessions;
 }
 
 async function run(index) {
@@ -50,47 +66,112 @@ function percentile(values, fraction) {
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)];
 }
 
+function createSummary() {
+  return { requests: 0, successful: 0, failed: 0, samples: [] };
+}
+
+function record(summary, result) {
+  summary.requests++;
+  if (!result.ok) {
+    summary.failed++;
+    return;
+  }
+  summary.successful++;
+  if (summary.samples.length < maxLatencySamples) {
+    summary.samples.push(result.ms);
+    return;
+  }
+  // Reservoir sampling keeps percentiles useful for multi-hour runs without
+  // retaining one latency record per request.
+  const replacement = Math.floor(Math.random() * summary.successful);
+  if (replacement < maxLatencySamples) summary.samples[replacement] = result.ms;
+}
+
+function formatSummary(summary) {
+  return {
+    requests: summary.requests,
+    successful: summary.successful,
+    failed: summary.failed,
+    p50Ms: Number(percentile(summary.samples, 0.5).toFixed(1)),
+    p95Ms: Number(percentile(summary.samples, 0.95).toFixed(1)),
+    latencySamples: summary.samples.length,
+  };
+}
+
 const before = await pressure();
+const startedAt = new Date().toISOString();
 const started = Date.now();
-const results = [];
+const deadline = durationSeconds === undefined ? undefined : started + durationSeconds * 1000;
+const summaries = { http: createSummary(), browser: createSummary() };
+const failures = [];
+const memorySamples = [{ elapsedSeconds: 0, memory: before.memory, browserWorkers: workerSnapshot(before) }];
 let next = 0;
-await Promise.all(
-  Array.from({ length: Math.min(concurrency, requests) }, async () => {
-    while (next < requests) {
-      const index = next++;
-      results.push(await run(index));
+let stoppedSampling = false;
+let sampling = Promise.resolve();
+
+const sample = () => {
+  sampling = sampling.then(async () => {
+    if (stoppedSampling) return;
+    try {
+      const snapshot = await pressure();
+      memorySamples.push({
+        elapsedSeconds: Number(((Date.now() - started) / 1000).toFixed(1)),
+        memory: snapshot.memory,
+        browserWorkers: workerSnapshot(snapshot),
+      });
+    } catch (error) {
+      if (failures.length < 20)
+        failures.push({ kind: "sampling", ok: false, error: String(error) });
     }
-  }),
-);
+  });
+};
+const sampler = setInterval(sample, sampleIntervalSeconds * 1000);
+
+try {
+  await Promise.all(
+    Array.from({ length: concurrency }, async () => {
+      while (deadline === undefined ? next < requests : Date.now() < deadline) {
+        const index = next++;
+        const result = await run(index);
+        record(summaries[result.kind], result);
+        if (!result.ok && failures.length < 20) failures.push(result);
+      }
+    }),
+  );
+} finally {
+  stoppedSampling = true;
+  clearInterval(sampler);
+  await sampling;
+}
+
 const after = await pressure();
 const durationMs = Date.now() - started;
-const summarize = (kind) => {
-  const items = results.filter((result) => result.kind === kind);
-  const successful = items.filter((result) => result.ok);
-  return {
-    requests: items.length,
-    successful: successful.length,
-    failed: items.length - successful.length,
-    p50Ms: Number(percentile(successful.map((result) => result.ms), 0.5).toFixed(1)),
-    p95Ms: Number(percentile(successful.map((result) => result.ms), 0.95).toFixed(1)),
-  };
-};
+memorySamples.push({
+  elapsedSeconds: Number((durationMs / 1000).toFixed(1)),
+  memory: after.memory,
+  browserWorkers: workerSnapshot(after),
+});
+const all = Object.values(summaries).reduce((total, summary) => total + summary.requests, 0);
 console.log(
   JSON.stringify(
     {
+      schemaVersion: 1,
+      startedAt,
+      completedAt: new Date().toISOString(),
       target,
-      requests,
+      mode: durationSeconds === undefined ? "requests" : "duration",
+      ...(durationSeconds === undefined ? { requestedRequests: requests } : { requestedDurationSeconds: durationSeconds }),
       concurrency,
       durationMs,
-      requestsPerSecond: Number((requests / (durationMs / 1000)).toFixed(2)),
-      workloads: { http: summarize("http"), browser: summarize("browser") },
-      memory: { before: before.memory, after: after.memory },
-      browserWorkers: { before: before.sessions, after: after.sessions },
-      failures: results.filter((result) => !result.ok).slice(0, 20),
+      requestsPerSecond: Number((all / (durationMs / 1000)).toFixed(2)),
+      workloads: { http: formatSummary(summaries.http), browser: formatSummary(summaries.browser) },
+      memory: { before: before.memory, after: after.memory, samples: memorySamples },
+      browserWorkers: { before: workerSnapshot(before), after: workerSnapshot(after) },
+      failures,
     },
     null,
     2,
   ),
 );
 
-if (results.some((result) => !result.ok)) process.exitCode = 1;
+if (failures.length) process.exitCode = 1;

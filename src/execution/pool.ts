@@ -47,6 +47,10 @@ export interface BrowserPoolStats {
   dead: number;
   browserRssMb: number;
   contextCapacity: number;
+  launches: number;
+  crashes: number;
+  recycled: number;
+  replacements: number;
 }
 
 function nodeRssMb(): number {
@@ -59,6 +63,10 @@ export class BrowserPool {
   private launchFailures = 0;
   private nextLaunchAt = 0;
   private closed = false;
+  private launches = 0;
+  private crashes = 0;
+  private recycled = 0;
+  private replacements = 0;
   private memory: BrowserMemorySnapshot = {
     nodeRssMb: nodeRssMb(),
     browserRssMb: 0,
@@ -81,7 +89,7 @@ export class BrowserPool {
     const workers = this.workers.splice(0);
     await Promise.all(
       workers.map(async (worker) => {
-        worker.state = "draining";
+        worker.state = "dead";
         await worker.server.close().catch(() => undefined);
       }),
     );
@@ -100,6 +108,10 @@ export class BrowserPool {
       dead: this.workers.filter((worker) => worker.state === "dead").length,
       browserRssMb: Number(this.memory.browserRssMb.toFixed(1)),
       contextCapacity: healthy.length * config.browserContextsPerWorker,
+      launches: this.launches,
+      crashes: this.crashes,
+      recycled: this.recycled,
+      replacements: this.replacements,
     };
   }
 
@@ -263,6 +275,7 @@ export class BrowserPool {
         }
       });
       this.workers.push(worker);
+      this.launches++;
       this.launchFailures = 0;
       this.nextLaunchAt = 0;
       await this.refreshMemory(true);
@@ -289,6 +302,7 @@ export class BrowserPool {
 
   private markDead(worker: Worker): void {
     if (worker.state === "dead") return;
+    this.crashes++;
     worker.state = "dead";
     const index = this.workers.indexOf(worker);
     if (index >= 0) this.workers.splice(index, 1);
@@ -303,7 +317,8 @@ export class BrowserPool {
       Date.now() < this.nextLaunchAt
     )
       return;
-    await this.launch().catch(() => undefined);
+    const worker = await this.launch().catch(() => undefined);
+    if (worker) this.replacements++;
   }
 
   private async recycle(worker: Worker): Promise<void> {
@@ -314,10 +329,16 @@ export class BrowserPool {
     )
       worker.state = "draining";
     if (worker.active > 0 || worker.state === "healthy") return;
-    const index = this.workers.indexOf(worker);
-    if (index >= 0) this.workers.splice(index, 1);
+    this.retire(worker);
+    this.recycled++;
     await worker.server.close().catch(() => undefined);
     await this.refreshMemory(true);
     await this.replenish();
+  }
+
+  private retire(worker: Worker): void {
+    worker.state = "dead";
+    const index = this.workers.indexOf(worker);
+    if (index >= 0) this.workers.splice(index, 1);
   }
 }

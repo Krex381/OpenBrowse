@@ -158,7 +158,9 @@ requests.
 Use measured data from your own deployment; OpenBrowse does not publish
 synthetic capacity claims. The soak runner mixes four HTTP-first requests with
 one forced browser render, reports p50/p95 latency, failures, worker state,
-and Node, Chromium-tree, and cgroup memory snapshots.
+and Node, Chromium-tree, and cgroup memory snapshots. Long-running mode also
+records periodic snapshots, so RSS growth is visible instead of inferred from
+only the start and end of a test.
 
 ```bash
 export OPENBROWSE_BENCHMARK_API_KEY="$OPENBROWSE_API_KEY"
@@ -170,8 +172,21 @@ npm run benchmark:soak > benchmark.json
 
 For reliability evidence, run the same command with a controlled target for
 one hour, six hours, and twenty-four hours. Keep the JSON output with the
-deployment configuration and inspect `failures`, `memory`, and the p95 values
-before calling a capacity figure production-ready.
+deployment configuration and inspect `failures`, `memory.samples`, and the
+p95 values before calling a capacity figure production-ready.
+
+```bash
+for hours in 1 6 24; do
+  OPENBROWSE_BENCHMARK_DURATION_SECONDS=$((hours * 3600)) \
+    npm run benchmark:soak > "benchmark-${hours}h.json"
+done
+```
+
+See [the benchmark protocol](docs/benchmarks/README.md) for the required
+container settings, target characteristics, report schema, and publication
+criteria. Capacity numbers belong in a dated report with its exact
+configuration and raw JSON; the repository deliberately does not substitute
+made-up figures for that evidence.
 
 ## License and notices
 
