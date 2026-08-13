@@ -1,0 +1,18 @@
+@layer components {
+  .workbench-shell { min-block-size: 100dvb; max-inline-size: 90rem; margin-inline: auto; }
+  .workbench-header { min-block-size: 5rem; padding-inline: var(--space-2); display: flex; align-items: center; justify-content: space-between; border-block-end: 1px solid var(--line); }
+  .return-link { color: var(--text-muted); font-family: var(--mono); font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; }
+  .workbench-main { max-inline-size: 76rem; margin-inline: auto; padding: clamp(2rem, 7vw, 6rem) var(--space-2); }
+  .workbench-eyebrow { color: var(--accent); font: .7rem var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+  .workbench-main h1 { max-inline-size: 12ch; margin-block: 1rem 1.4rem; font: 600 clamp(3rem, 7vw, 6.5rem)/.9 var(--display); letter-spacing: -.065em; }
+  .workbench-deck { max-inline-size: 47rem; color: var(--text-muted); font-size: 1.05rem; }
+  .workbench-connection { margin-block: 2rem; display: grid; grid-template-columns: minmax(12rem,1fr) minmax(12rem,1fr) minmax(12rem,1fr); gap: 1rem; }
+  .workbench-connection label, .viewer-controls label, .editor-label { display: grid; gap: .5rem; color: var(--text-muted); font: .7rem var(--mono); letter-spacing: .04em; text-transform: uppercase; }
+  .workbench-connection input, .viewer-controls input, .editor-label textarea { inline-size: 100%; min-block-size: 2.9rem; padding: .75rem; border: 1px solid var(--line); border-radius: .4rem; background: var(--surface); color: var(--text); font: 1rem var(--body); text-transform: none; letter-spacing: normal; }
+  .editor-label textarea { min-block-size: 20rem; resize: block; font-family: var(--mono); font-size: .86rem; line-height: 1.55; }
+  .studio-grid { display: grid; gap: 1rem; }.studio-grid .workbench-connection { grid-column: 1/-1; }
+  .workbench-button { min-block-size: 2.9rem; padding-inline: 1rem; border-radius: .4rem; background: var(--accent); color: var(--canvas); cursor: pointer; font: 700 .7rem var(--mono); letter-spacing: .04em; text-transform: uppercase; }.workbench-button.secondary { background: var(--surface-raised); color: var(--text); border: 1px solid var(--line); }.workbench-button:disabled { opacity: .55; cursor: wait; }
+  .workbench-output { min-block-size: 14rem; max-block-size: 36rem; padding: 1rem; overflow: auto; border: 1px solid var(--line); border-radius: .55rem; background: oklch(.105 .008 70); color: oklch(.84 .05 95); font: .8rem/1.6 var(--mono); white-space: pre-wrap; }
+  .viewer-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(16rem, .7fr); gap: 1rem; }.viewer-screen { position: relative; aspect-ratio: 16 / 10; overflow: hidden; border: 1px solid var(--line); border-radius: .7rem; background: #080807; }.viewer-screen img { inline-size: 100%; block-size: 100%; object-fit: contain; }.viewer-empty { display: grid; min-block-size: 100%; place-items: center; padding: 2rem; color: var(--text-muted); text-align: center; }.vnc-target { position: absolute; inset: 0; display: none; background: #080807; }.vnc-target canvas { inline-size: 100% !important; block-size: 100% !important; }.vnc-target:has(canvas) { display: block; }.viewer-controls { display: grid; align-content: start; gap: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--surface); }.viewer-controls p { color: var(--text-muted); font-size: .9rem; }.viewer-controls form { display: grid; gap: .75rem; }.vnc-connect { margin-block-start: 1rem; }
+  @media (max-width: 767px) { .workbench-connection, .viewer-grid { grid-template-columns: 1fr; } }
+}

@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: openbrowse }
+spec:
+  # SQLite-backed session and usage state requires a single writer. Use an external shared store before scaling out.
+  replicas: 1
+  selector: { matchLabels: { app: openbrowse } }
+  template:
+    metadata: { labels: { app: openbrowse } }
+    spec:
+      securityContext:
+        fsGroup: 10001
+        # Install deploy/seccomp_profile.json as this Localhost profile on each
+        # Kubernetes node before applying this manifest.
+        seccompProfile:
+          type: Localhost
+          localhostProfile: openbrowse-playwright.json
+      containers:
+        - name: openbrowse
+          image: ghcr.io/openbrowse/openbrowse:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 3000 }]
+          env:
+            - name: OPENBROWSE_API_KEYS
+              valueFrom:
+                secretKeyRef: { name: openbrowse-secrets, key: api-keys }
+            - name: OPENBROWSE_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: { name: openbrowse-secrets, key: encryption-key }
+            - { name: OPENBROWSE_MAX_CONCURRENCY, value: "4" }
+            - { name: OPENBROWSE_CHROMIUM_SANDBOX, value: "true" }
+            - { name: OPENBROWSE_EGRESS_PROXY_URL, value: "http://openbrowse-egress-proxy:3128" }
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "2", memory: "2Gi" }
+          readinessProbe: { httpGet: { path: /readyz, port: 3000 } }
+          livenessProbe: { httpGet: { path: /healthz, port: 3000 } }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: openbrowse-data }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 256Mi }
+      automountServiceAccountToken: false
+---
+# Default-deny egress for the browser worker. Production deployments must
+# provide the selected proxy Service; it is responsible for DNS resolution and
+# rejecting private, link-local, cluster, node, and metadata ranges.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: openbrowse-egress }
+spec:
+  podSelector: { matchLabels: { app: openbrowse } }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - podSelector: { matchLabels: { app: openbrowse-egress-proxy } }
+      ports:
+        - { protocol: TCP, port: 3128 }

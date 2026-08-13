@@ -1,0 +1,9 @@
+node_modules/
+.npm-cache/
+.playwright-browsers/
+dist/
+data/
+.env
+public/landing/
+coverage/
+playwright-report/

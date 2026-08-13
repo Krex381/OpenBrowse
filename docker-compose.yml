@@ -1,0 +1,27 @@
+services:
+  openbrowse:
+    build: .
+    init: true
+    ports: ["3000:3000"]
+    environment:
+      OPENBROWSE_API_KEYS: ${OPENBROWSE_API_KEYS:?set-a-random-api-key}
+      OPENBROWSE_ENCRYPTION_KEY: ${OPENBROWSE_ENCRYPTION_KEY:?set-a-random-encryption-key}
+      OPENBROWSE_DATA_DIR: /data
+      OPENBROWSE_MAX_CONCURRENCY: "4"
+      OPENBROWSE_BROWSER_POOL_MAX: "2"
+      OPENBROWSE_CHROMIUM_SANDBOX: "true"
+      OPENBROWSE_VNC_BRIDGE_URL: ws://127.0.0.1:6080
+    volumes: ["openbrowse-data:/data"]
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=256m"]
+    shm_size: "1gb"
+    mem_limit: "2g"
+    cpus: 2
+    pids_limit: 512
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./deploy/seccomp_profile.json
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+volumes:
+  openbrowse-data:
