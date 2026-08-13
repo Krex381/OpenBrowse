@@ -1,13 +1,51 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createServer, type Server } from "node:http";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Services } from "../../src/server.js";
 import { buildServer } from "../../src/server.js";
 
 let services: Services;
+let downloadFixture: Server;
+let downloadFixtureUrl: string;
+
+vi.mock("../../src/security.js", async (importOriginal) => {
+  const security = await importOriginal<typeof import("../../src/security.js")>();
+  return {
+    ...security,
+    assertSafeUrl: async (value: string, allowedDomains?: readonly string[]) =>
+      value.startsWith("http://127.0.0.1:")
+        ? new URL(value)
+        : security.assertSafeUrl(value, allowedDomains),
+  };
+});
+
 beforeAll(async () => {
+  downloadFixture = createServer((request, response) => {
+    if (request.url === "/download") {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end('<a data-download href="/fixture.csv" download="fixture.csv">Download</a>');
+      return;
+    }
+    if (request.url === "/fixture.csv") {
+      response.setHeader("content-type", "text/csv; charset=utf-8");
+      response.setHeader("content-disposition", 'attachment; filename="fixture.csv"');
+      response.end("id,name\n1,OpenBrowse\n");
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise<void>((resolve) =>
+    downloadFixture.listen(0, "127.0.0.1", resolve),
+  );
+  const address = downloadFixture.address();
+  if (!address || typeof address === "string")
+    throw new Error("Download fixture did not bind to a TCP port");
+  downloadFixtureUrl = `http://127.0.0.1:${address.port}/download`;
   services = await buildServer();
 });
 afterAll(async () => {
   await services.close();
+  await new Promise<void>((resolve) => downloadFixture.close(() => resolve()));
 });
 
 describe("Browserless migration aliases", () => {
@@ -49,20 +87,19 @@ describe("Browserless migration aliases", () => {
     expect(response.headers["content-type"]).toBe("application/zip");
     expect(response.rawPayload.subarray(0, 4).toString("hex")).toBe("504b0304");
   }, 30000);
-  it("downloads a selected public browser file without accepting arbitrary code", async () => {
+  it("downloads a selected browser file with only a CSS selector", async () => {
     const response = await services.app.inject({
       method: "POST",
       url: "/download?token=dev-key",
       payload: {
-        url: "https://filesamples.com/formats/csv",
-        selector: 'a[href*=".csv"]',
-        timeout: 30000,
+        url: downloadFixtureUrl,
+        selector: "a[data-download]",
       },
     });
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("text/csv");
-    expect(response.headers["content-disposition"]).toContain("sample4.csv");
-    expect(response.rawPayload.length).toBeGreaterThan(100);
+    expect(response.headers["content-disposition"]).toContain("fixture.csv");
+    expect(response.rawPayload.toString("utf8")).toBe("id,name\n1,OpenBrowse\n");
   }, 30000);
   it("records an authenticated session trace and serves it as a ZIP", async () => {
     const headers = { authorization: "Bearer dev-key" };
