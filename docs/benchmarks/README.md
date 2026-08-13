@@ -36,8 +36,11 @@ The runner caps retained latency samples with reservoir sampling, so a long run
 does not itself consume unbounded memory.
 
 The short Docker smoke in GitHub Actions validates that the resulting report
-used cgroup admission and contains memory samples. It is a telemetry contract,
-not a substitute for the 1 h / 6 h / 24 h runs above.
+declares a supported admission authority and contains memory samples. It uses
+cgroup admission only where the runtime exposes a finite cgroup limit; nested
+CI containers commonly expose an unbounded parent cgroup and correctly report
+the process-tree fallback. It is a telemetry contract, not a substitute for
+the 1 h / 6 h / 24 h runs above.
 
 ## Publication criteria
 

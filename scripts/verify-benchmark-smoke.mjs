@@ -8,16 +8,21 @@ if (report.schemaVersion !== 1) errors.push("unexpected benchmark schema version
 if (report.failures?.length) errors.push("benchmark reported request or sampling failures");
 if (!Array.isArray(report.memory?.samples) || report.memory.samples.length < 2)
   errors.push("benchmark did not retain start and end memory samples");
-if (!Array.isArray(report.memory?.admissionAuthorities) || !report.memory.admissionAuthorities.includes("cgroup"))
-  errors.push("Docker benchmark did not use cgroup memory as its admission authority");
-if (!(report.memory?.peakContainerRssMb > 0))
-  errors.push("Docker benchmark did not report a container memory charge");
+const authorities = report.memory?.admissionAuthorities;
+if (!Array.isArray(authorities) || authorities.length === 0)
+  errors.push("benchmark did not report a memory admission authority");
+if (!authorities?.every((authority) => ["cgroup", "process-tree", "node"].includes(authority)))
+  errors.push("benchmark reported an unknown memory admission authority");
+if (authorities?.includes("cgroup") && !(report.memory?.peakContainerRssMb > 0))
+  errors.push("cgroup admission was selected without a container memory charge");
+if (!authorities?.includes("cgroup") && !(report.memory?.peakProcessTreeRssMb > 0))
+  errors.push("fallback admission was selected without process-tree diagnostics");
 if (!(report.memory?.peakAdmissionRssMb > 0))
   errors.push("benchmark did not report peak admission RSS");
 
 if (errors.length) throw new Error(`${file}: ${errors.join("; ")}`);
 console.log(JSON.stringify({
-  cgroupAdmission: true,
+  admissionAuthorities: authorities,
   peakAdmissionRssMb: report.memory.peakAdmissionRssMb,
   peakContainerRssMb: report.memory.peakContainerRssMb,
   workerTransitions: report.workerTransitions,
