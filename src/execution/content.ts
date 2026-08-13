@@ -7,6 +7,27 @@ import { BrowserPool } from "./pool.js";
 import { appearsClientRendered, timeout } from "./shared.js";
 import type { FetchInput, FetchResult, Output } from "./types.js";
 
+const defaultRenderSettleMs = 2_500;
+
+/**
+ * A Vite/React shell reaches DOMContentLoaded before its initial effects and
+ * data requests have painted useful content. When the caller did not choose a
+ * navigation policy, wait briefly for the network to settle. This is best
+ * effort: long-polling, analytics, or a websocket must not turn an otherwise
+ * usable page into a timeout.
+ */
+export async function settleRenderedPage(
+  page: Pick<import("playwright").Page, "waitForLoadState">,
+  input: Pick<FetchInput, "waitUntil" | "timeoutMs">,
+): Promise<void> {
+  if (input.waitUntil) return;
+  await page
+    .waitForLoadState("networkidle", {
+      timeout: Math.min(defaultRenderSettleMs, timeout(input.timeoutMs)),
+    })
+    .catch(() => undefined);
+}
+
 export async function browserFetch(
   pool: BrowserPool,
   input: FetchInput,
@@ -19,6 +40,7 @@ export async function browserFetch(
       const response = await page.goto(input.url, {
         waitUntil: input.waitUntil ?? "domcontentloaded",
       });
+      await settleRenderedPage(page, input);
       const html = await page.content();
       const finalUrl = normalizeUrl(page.url());
       if (/captcha|recaptcha|hcaptcha|cf-chl-/i.test(html))
