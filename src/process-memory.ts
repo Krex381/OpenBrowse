@@ -85,12 +85,20 @@ async function linuxRssMb(pid: number): Promise<number> {
 }
 
 async function cgroupRssMb(): Promise<number | undefined> {
-  try {
-    const value = Number((await readFile("/sys/fs/cgroup/memory.current", "utf8")).trim());
-    return Number.isFinite(value) ? mb(value) : undefined;
-  } catch {
-    return undefined;
+  for (const path of [
+    // cgroup v2
+    "/sys/fs/cgroup/memory.current",
+    // cgroup v1, still common on hosted Linux runners and older kernels.
+    "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+  ]) {
+    try {
+      const value = Number((await readFile(path, "utf8")).trim());
+      if (Number.isFinite(value)) return mb(value);
+    } catch {
+      // Try the other hierarchy before falling back to process-tree RSS.
+    }
   }
+  return undefined;
 }
 
 /**
