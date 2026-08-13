@@ -14,6 +14,7 @@ import { normalizeUrl } from "../../security.js";
 import type { StoredProxy, StoredSession, Storage } from "../../storage.js";
 import {
   agentCommandSchema,
+  browserWait,
   parse,
   selector,
   url,
@@ -209,6 +210,7 @@ export function registerMcpRoutes(input: {
               .array(z.enum(["html", "markdown", "links"]))
               .max(3)
               .default(["markdown"]),
+            wait: browserWait.optional(),
           }),
           params.arguments,
         );

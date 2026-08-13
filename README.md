@@ -87,6 +87,32 @@ curl -X POST http://localhost:3000/v1/fetch \
   }'
 ```
 
+For JavaScript applications, `auto` first fetches the HTTP response, detects a
+client-rendered shell, then uses Chromium. The default browser fallback first
+observes meaningful structural DOM changes briefly, then waits for it to become
+quiet (600 ms quiet window, 4 s maximum), not for global network idle. Small
+text-only updates such as clocks do not keep the wait alive. This avoids being
+held hostage by analytics, polling, or WebSockets.
+
+When you know a page's readiness signal, override it with a typed wait:
+
+```json
+{
+  "url": "https://example.com/profile",
+  "strategy": "auto",
+  "wait": {
+    "type": "selector",
+    "selector": "[data-profile-loaded]",
+    "state": "visible"
+  },
+  "output": ["markdown"]
+}
+```
+
+Supported wait types are `domcontentloaded`, `load`, `networkidle`, `selector`,
+`delay`, and `stability`. The legacy `waitUntil` field remains supported but
+cannot be combined with `wait`.
+
 `auto` uses HTTP first and escalates to Chromium only when the response looks
 client-rendered. The OpenAPI document is available at `/openapi.json`; the
 local product UI is at `/landing`.

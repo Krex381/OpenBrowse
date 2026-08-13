@@ -9,12 +9,35 @@ export const viewport = z.object({
   height: z.number().int().min(64).max(4096),
   deviceScaleFactor: z.number().min(0.5).max(3).optional(),
 });
+export const browserWait = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("domcontentloaded") }),
+  z.object({ type: z.literal("load") }),
+  z.object({
+    type: z.literal("networkidle"),
+    timeoutMs: z.number().int().min(100).max(config.jobTimeoutMs).optional(),
+  }),
+  z.object({
+    type: z.literal("selector"),
+    selector: z.string().min(1).max(512),
+    state: z.enum(["attached", "visible"]).optional(),
+  }),
+  z.object({
+    type: z.literal("delay"),
+    ms: z.number().int().min(1).max(config.jobTimeoutMs),
+  }),
+  z.object({
+    type: z.literal("stability"),
+    quietMs: z.number().int().min(100).max(2_000).optional(),
+    timeoutMs: z.number().int().min(250).max(config.jobTimeoutMs).optional(),
+  }),
+]);
 export const fetchInput = z.object({
   url,
   strategy,
   timeoutMs: z.number().int().min(100).max(config.jobTimeoutMs).optional(),
   headers: z.record(z.string(), z.string()).optional(),
   waitUntil: z.enum(["load", "domcontentloaded", "networkidle"]).optional(),
+  wait: browserWait.optional(),
   output: z
     .array(z.enum(["html", "markdown", "links"]))
     .max(3)
@@ -30,6 +53,13 @@ export const fetchInput = z.object({
     .regex(/^pxy_[a-z0-9]+$/)
     .optional(),
   viewport: viewport.optional(),
+}).superRefine((value, context) => {
+  if (value.wait && value.waitUntil)
+    context.addIssue({
+      code: "custom",
+      path: ["wait"],
+      message: "wait and waitUntil cannot be used together",
+    });
 });
 export const selector = z
   .object({

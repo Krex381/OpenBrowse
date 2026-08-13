@@ -6,7 +6,12 @@ Every authenticated request passes through API-key policy checks, rate limits,
 target validation, cache lookup, and queue admission. The `auto` strategy uses
 HTTP first. Sparse client-rendered responses can be escalated to a reusable
 Chromium process, where each job receives an isolated browser context and
-subresource URL validation.
+subresource URL validation. Auto-escalated pages use a bounded DOM-stability
+observer before extraction (short observation period, 600 ms quiet window, 4 s maximum). It ignores small text-only
+mutations such as live clocks; this does not
+depend on network idle and is therefore safe for polling and WebSocket-heavy
+applications. Callers can replace it with a typed wait condition such as a CSS
+selector, delay, navigation state, network idle, or custom stability bounds.
 
 ## Storage and lifecycle
 

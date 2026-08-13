@@ -5,42 +5,159 @@ import { httpFetch } from "./http.js";
 import { htmlToMarkdown } from "./markdown.js";
 import { BrowserPool } from "./pool.js";
 import { appearsClientRendered, timeout } from "./shared.js";
-import type { FetchInput, FetchResult, Output } from "./types.js";
+import type { BrowserWait, FetchInput, FetchResult, Output } from "./types.js";
 
-const defaultRenderSettleMs = 2_500;
+const defaultStabilityWait: Required<Extract<BrowserWait, { type: "stability" }>> = {
+  type: "stability",
+  quietMs: 600,
+  timeoutMs: 4_000,
+};
+const defaultStabilityObservationMs = 1_500;
+
+type ReadyPage = Pick<
+  import("playwright").Page,
+  "evaluate" | "locator" | "waitForLoadState" | "waitForTimeout"
+>;
+type BrowserMutationObserver = {
+  observe(target: unknown, options: Record<string, boolean>): void;
+  disconnect(): void;
+};
+type BrowserGlobals = {
+  document: { documentElement: unknown };
+  MutationObserver: new (
+    callback: (
+      records: Array<{
+        type: string;
+        addedNodes?: ArrayLike<{ nodeType: number; textContent?: string | null }>;
+        removedNodes?: ArrayLike<{ nodeType: number; textContent?: string | null }>;
+      }>,
+    ) => void,
+  ) => BrowserMutationObserver;
+  setTimeout: (handler: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+  clearTimeout: (timer: ReturnType<typeof setTimeout>) => void;
+};
 
 /**
- * A Vite/React shell reaches DOMContentLoaded before its initial effects and
- * data requests have painted useful content. When the caller did not choose a
- * navigation policy, wait briefly for the network to settle. This is best
- * effort: long-polling, analytics, or a websocket must not turn an otherwise
- * usable page into a timeout.
+ * Waits for a post-navigation readiness signal. The stability implementation
+ * observes meaningful DOM changes rather than relying on network idle, which
+ * is unreliable for pages with analytics, polling, and WebSockets.
  */
-export async function settleRenderedPage(
-  page: Pick<import("playwright").Page, "waitForLoadState">,
-  input: Pick<FetchInput, "waitUntil" | "timeoutMs">,
+export async function waitForBrowserReadiness(
+  page: ReadyPage,
+  wait: BrowserWait,
+  options: { minimumObservationMs?: number } = {},
 ): Promise<void> {
-  if (input.waitUntil) return;
-  await page
-    .waitForLoadState("networkidle", {
-      timeout: Math.min(defaultRenderSettleMs, timeout(input.timeoutMs)),
-    })
-    .catch(() => undefined);
+  if (wait.type === "domcontentloaded" || wait.type === "load") {
+    await page.waitForLoadState(wait.type);
+    return;
+  }
+  if (wait.type === "networkidle") {
+    await page.waitForLoadState("networkidle", { timeout: wait.timeoutMs });
+    return;
+  }
+  if (wait.type === "selector") {
+    await page.locator(wait.selector).waitFor({ state: wait.state ?? "visible" });
+    return;
+  }
+  if (wait.type === "delay") {
+    await page.waitForTimeout(wait.ms);
+    return;
+  }
+  const quietMs = wait.quietMs ?? defaultStabilityWait.quietMs;
+  const timeoutMs = Math.max(quietMs, wait.timeoutMs ?? defaultStabilityWait.timeoutMs);
+  const minimumObservationMs = Math.min(options.minimumObservationMs ?? 0, timeoutMs);
+  await page.evaluate(
+    ({ quietMs: quiet, timeoutMs: maximum, minimumObservationMs: observation }) =>
+      new Promise<void>((resolve) => {
+      const browser = globalThis as unknown as BrowserGlobals;
+      let complete = false;
+      let observationComplete = observation === 0;
+      let quietTimer: ReturnType<typeof setTimeout> | undefined;
+      let maximumTimer: ReturnType<typeof setTimeout> | undefined;
+      let observationTimer: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (complete) return;
+        complete = true;
+        if (quietTimer) browser.clearTimeout(quietTimer);
+        if (maximumTimer) browser.clearTimeout(maximumTimer);
+        if (observationTimer) browser.clearTimeout(observationTimer);
+        observer.disconnect();
+        resolve();
+      };
+      const resetQuietTimer = () => {
+        if (quietTimer) browser.clearTimeout(quietTimer);
+        quietTimer = browser.setTimeout(() => {
+          if (observationComplete) finish();
+        }, quiet);
+      };
+      const observer = new browser.MutationObserver((records) => {
+        const meaningful = records.some((record) => {
+          if (record.type !== "childList") return false;
+          const nodes = [
+            ...Array.from(record.addedNodes ?? []),
+            ...Array.from(record.removedNodes ?? []),
+          ];
+          return nodes.some(
+            (node) =>
+              node.nodeType === 1 || (node.textContent?.trim().length ?? 0) >= 80,
+          );
+        });
+        if (meaningful)
+          resetQuietTimer();
+      });
+      observer.observe(browser.document.documentElement, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+      maximumTimer = browser.setTimeout(finish, maximum);
+      if (!observationComplete)
+        observationTimer = browser.setTimeout(() => {
+          observationComplete = true;
+          resetQuietTimer();
+        }, observation);
+      resetQuietTimer();
+    }),
+    { quietMs, timeoutMs, minimumObservationMs },
+  );
+}
+
+function renderWait(
+  input: FetchInput,
+  defaultStability: boolean,
+): BrowserWait | undefined {
+  if (input.wait) return input.wait;
+  if (input.waitUntil || !defaultStability) return undefined;
+  const budget = timeout(input.timeoutMs);
+  return {
+    ...defaultStabilityWait,
+    quietMs: Math.min(defaultStabilityWait.quietMs, budget),
+    timeoutMs: Math.min(defaultStabilityWait.timeoutMs, budget),
+  };
 }
 
 export async function browserFetch(
   pool: BrowserPool,
   input: FetchInput,
+  options: { defaultStability?: boolean } = {},
 ): Promise<Omit<FetchResult, "strategy" | "attempted" | "fetchMs">> {
   const started = Date.now();
   await assertSafeUrl(input.url, input.proxy?.allowedDomains);
   return pool
     .withContext(input.viewport, input.proxy, async (_context, page) => {
       page.setDefaultNavigationTimeout(timeout(input.timeoutMs));
+      page.setDefaultTimeout(timeout(input.timeoutMs));
       const response = await page.goto(input.url, {
         waitUntil: input.waitUntil ?? "domcontentloaded",
       });
-      await settleRenderedPage(page, input);
+      const wait = renderWait(input, options.defaultStability ?? false);
+      if (wait)
+        await waitForBrowserReadiness(page, wait, {
+          minimumObservationMs:
+            !input.wait && !input.waitUntil && options.defaultStability
+              ? defaultStabilityObservationMs
+              : 0,
+        });
       const html = await page.content();
       const finalUrl = normalizeUrl(page.url());
       if (/captcha|recaptcha|hcaptcha|cf-chl-/i.test(html))
@@ -93,7 +210,7 @@ export async function adaptiveFetch(
   const http = await httpFetch(input);
   if (strategy === "http" || !http.html || !appearsClientRendered(http.html))
     return { ...http, strategy: "http", attempted: ["http"], browserMs: 0 };
-  const browser = await browserFetch(pool, input);
+  const browser = await browserFetch(pool, input, { defaultStability: true });
   return {
     ...browser,
     strategy: "browser",

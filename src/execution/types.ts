@@ -2,6 +2,14 @@ import type { StoredProxy } from "../storage.js";
 
 export type Strategy = "auto" | "http" | "quickjs" | "browser";
 export type Output = "html" | "markdown" | "links";
+export type NavigationWait = "load" | "domcontentloaded" | "networkidle";
+export type BrowserWait =
+  | { type: "domcontentloaded" }
+  | { type: "load" }
+  | { type: "networkidle"; timeoutMs?: number }
+  | { type: "selector"; selector: string; state?: "attached" | "visible" }
+  | { type: "delay"; ms: number }
+  | { type: "stability"; quietMs?: number; timeoutMs?: number };
 
 export interface Viewport {
   width: number;
@@ -14,7 +22,9 @@ export interface FetchInput {
   strategy?: Strategy;
   timeoutMs?: number;
   headers?: Record<string, string>;
-  waitUntil?: "load" | "domcontentloaded" | "networkidle";
+  /** @deprecated Use `wait` for post-navigation readiness control. */
+  waitUntil?: NavigationWait;
+  wait?: BrowserWait;
   output?: Output[];
   viewport?: Viewport;
   proxy?: StoredProxy;

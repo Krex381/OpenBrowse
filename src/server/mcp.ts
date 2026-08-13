@@ -75,6 +75,22 @@ export const mcpTools = [
           type: "array",
           items: { type: "string", enum: ["html", "markdown", "links"] },
         },
+        wait: {
+          type: "object",
+          description: "Optional post-navigation readiness condition for browser rendering.",
+          properties: {
+            type: {
+              type: "string",
+              enum: ["domcontentloaded", "load", "networkidle", "selector", "delay", "stability"],
+            },
+            selector: { type: "string" },
+            state: { type: "string", enum: ["attached", "visible"] },
+            ms: { type: "number" },
+            quietMs: { type: "number" },
+            timeoutMs: { type: "number" },
+          },
+          required: ["type"],
+        },
       },
       required: ["url"],
     },

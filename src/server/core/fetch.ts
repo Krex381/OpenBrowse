@@ -43,6 +43,7 @@ export function createFetchService(input: {
       ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
       ...(body.headers ? { headers: body.headers } : {}),
       ...(body.waitUntil ? { waitUntil: body.waitUntil } : {}),
+      ...(body.wait ? { wait: body.wait } : {}),
       ...(body.viewport ? { viewport: body.viewport } : {}),
       ...(proxy ? { proxy } : {}),
     };
@@ -53,6 +54,8 @@ export function createFetchService(input: {
       output: body.output,
       viewport: body.viewport,
       headers: body.headers ?? {},
+      waitUntil: body.waitUntil,
+      wait: body.wait,
     });
     const cacheable =
       body.cache.mode === "default" &&
