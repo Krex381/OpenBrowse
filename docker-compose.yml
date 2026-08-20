@@ -23,7 +23,11 @@ services:
       OPENBROWSE_CHROMIUM_SANDBOX: "true"
       OPENBROWSE_VNC_BRIDGE_URL: ws://127.0.0.1:6080
     volumes: ["openbrowse-data:/data"]
-    tmpfs: ["/tmp:rw,nosuid,nodev,size=256m"]
+    tmpfs:
+      - "/tmp:rw,nosuid,nodev,size=256m,mode=1777"
+      # Xorg requires this socket directory to be root-owned even though Xvfb,
+      # x11vnc, websockify, Node, and every browser run as UID 10001.
+      - "/tmp/.X11-unix:rw,nosuid,nodev,size=1m,mode=1777,uid=0,gid=0"
     shm_size: "1gb"
     mem_limit: "2g"
     cpus: 2
