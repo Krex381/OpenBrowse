@@ -150,6 +150,7 @@ export async function buildServer(): Promise<Services> {
   registerAdminRoutes({ app, storage, cache, queue, pool, resolveProxy, requestKeyHash });
   registerSocketRoutes({ app, storage, sessions, requestKeyHash });
 
+  let closePromise: Promise<void> | undefined;
   return {
     app,
     storage,
@@ -157,11 +158,15 @@ export async function buildServer(): Promise<Services> {
     sessions,
     queue,
     cache,
-    close: async () => {
-      await sessions.closeAll();
-      await cdp.closeAll();
-      await pool.close();
-      await app.close();
+    close: () => {
+      closePromise ??= (async () => {
+        await app.close();
+        await sessions.closeAll();
+        await cdp.closeAll();
+        await pool.close();
+        storage.close();
+      })();
+      return closePromise;
     },
   };
 }

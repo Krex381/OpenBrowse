@@ -48,6 +48,11 @@ export class Cache {
       expiresAt: Date.now() + ttlSeconds * 1000,
     });
   }
+  async delete(key: string): Promise<void> {
+    const entry = this.memory.get(key);
+    if (entry) this.removeMemory(key, entry);
+    await this.storage.deleteCache(key);
+  }
   async purge(value?: string): Promise<number> {
     this.memory.clear();
     this.memoryBytes = 0;

@@ -4,7 +4,12 @@ import { config } from "../../config.js";
 import { OpenBrowseError } from "../../errors.js";
 import type { Cache } from "../../cache.js";
 import type { AdmissionQueue } from "../../queue.js";
-import { pdf, screenshot, type BrowserPool } from "../../execution.js";
+import {
+  browserBackendCatalog,
+  pdf,
+  screenshot,
+  type BrowserPool,
+} from "../../execution.js";
 import { assertSafeUrl } from "../../security.js";
 import type { StoredProxy, Storage } from "../../storage.js";
 import { parse, url, viewport } from "../input.js";
@@ -265,6 +270,25 @@ export function registerAdminRoutes(input: {
     return reply.send(artifact.body);
   });
   app.get("/v1/capabilities", async () => ({
+    execution: {
+      planner: "deterministic-http-first-v1",
+      defaultBackend: config.defaultBrowserBackend,
+      browserBackends: browserBackendCatalog(),
+      optionalBackends: {
+        invisiblePlaywright: "replaced by the Node-native patchright-chromium backend",
+        cloakBrowser: config.enabledBrowserBackends.has("cloakbrowser-chromium")
+          ? "operator-enabled; applicable binary/OEM/SaaS license accepted by operator"
+          : "installed integration; disabled until operator accepts licensing and enables the backend",
+        camoufox: config.enabledBrowserBackends.has("camoufox-firefox")
+          ? "operator-enabled; provision with npm run prepare:camoufox"
+          : "installed integration; disabled until the operator provisions and enables the backend",
+        clearcote: config.enabledBrowserBackends.has("clearcote-chromium")
+          ? config.clearcoteExecutablePath
+            ? "operator-enabled; executable path configured"
+            : "enabled but unavailable until OPENBROWSE_CLEARCOTE_EXECUTABLE_PATH is configured"
+          : "executable-path integration; disabled by default",
+      },
+    },
     browsers: {
       chromium: {
         playwright: config.rawBrowserProtocolBridges ? true : "disabled by operator policy",
@@ -298,9 +322,13 @@ export function registerAdminRoutes(input: {
       searchProviderConfigured: Boolean(config.searchEndpoint),
     },
     policies: {
-      captcha: "detect-and-fail",
-      stealth: "not implemented",
-      fingerprintEvasion: "not implemented",
+      captcha:
+        "detect, bounded backend escalation, and authenticated human session handoff",
+      stealth: "operator-selected backends only; never chosen from hostname or target response",
+      fingerprintEvasion:
+        "CloakBrowser and Clearcote accept bounded --fingerprint* arguments; Camoufox accepts typed backend options when operator-enabled",
+      humanization:
+        "CloakBrowser accepts bounded humanization configuration when operator-enabled",
       proxyRotation: "not implemented",
       extensions:
         config.chromiumExtensionDirs.length === 0

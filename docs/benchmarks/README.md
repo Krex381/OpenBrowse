@@ -35,12 +35,29 @@ done
 The runner caps retained latency samples with reservoir sampling, so a long run
 does not itself consume unbounded memory.
 
+For a reviewed multi-shape fixture set, use a comma-separated target list. The
+runner cycles targets deterministically and records the exact list and runtime
+environment in the report:
+
+```bash
+export OPENBROWSE_BENCHMARK_TARGETS='https://static.example,https://spa.example,https://news.example/article'
+export OPENBROWSE_BENCHMARK_BROWSER_EVERY=5
+```
+
 The short Docker smoke in GitHub Actions validates that the resulting report
 declares a supported admission authority and contains memory samples. It uses
 cgroup admission only where the runtime exposes a finite cgroup limit; nested
 CI containers commonly expose an unbounded parent cgroup and correctly report
 the process-tree fallback. It is a telemetry contract, not a substitute for
 the 1 h / 6 h / 24 h runs above.
+
+The verifier accepts a filename or `-` for stdin. This form deliberately keeps
+npm's command preamble in the stream and verifies that the JSON report is still
+located and parsed correctly:
+
+```bash
+npm run benchmark:soak | npm run verify:benchmark-smoke -- -
+```
 
 ## Publication criteria
 
@@ -49,8 +66,10 @@ limits, machine/host details, target description, and test date. Report:
 
 | Field | Source |
 | --- | --- |
-| HTTP/browser mix and successful requests | `workloads` |
-| p50/p95 latency | `workloads.*.p50Ms` and `p95Ms` |
+| Requested and actual HTTP/browser mix and successful requests | `workloads`, `workloads.*.actualStrategies` |
+| Selected browser backends | `workloads.*.backends` |
+| p50/p95/p99 latency | `workloads.*.p50Ms`, `p95Ms`, and `p99Ms` |
+| Commit/image, Node, Playwright, CPU, memory, platform, and workload controls | `environment` |
 | Peak and idle RSS | `memory.peakAdmissionRssMb`, `memory.samples`, and `memory.after` |
 | Memory authority and RSS divergence | `memory.admissionAuthorities`, `peakContainerRssMb`, and `peakProcessTreeRssMb` |
 | OOMs and browser recovery | container/runtime logs plus `browserWorkers.*.crashes` and `replacements` |
@@ -65,7 +84,7 @@ runner and protocol, not synthetic benchmark figures.
 ## Extraction corpus fidelity
 
 Latency and worker health do not prove that extraction preserved the page. Run
-an assertion-backed corpus of 100–500 pages across the content shapes you
+an assertion-backed corpus of 100-500 pages across the content shapes you
 support: news, documentation, blogs, product pages, and client-rendered apps.
 Only include public pages that you own or are authorised to test; record a
 stable, human-reviewed expectation for each one. The runner sends each page
@@ -84,7 +103,11 @@ to the required corpus size:
     "markdownIncludes": ["Product name", "Specifications"],
     "markdownExcludes": ["Cookie settings"],
     "minimumMarkdownChars": 600,
-    "minimumLinks": 3
+    "minimumLinks": 3,
+    "minimumArticleWords": 150,
+    "titleIncludes": "Product name",
+    "accessStatus": "open",
+    "expectedStrategy": "http"
   }
 }
 ```
@@ -96,8 +119,10 @@ export OPENBROWSE_CORPUS_CONCURRENCY=3
 npm run benchmark:corpus > extraction-corpus-result.json
 ```
 
-The default bounds enforce 100–500 pages. For a one-page wiring check only,
+The default bounds enforce 100-500 pages. For a one-page wiring check only,
 set `OPENBROWSE_CORPUS_MIN_PAGES=1`; do not treat that as fidelity evidence.
+Every case also requires a non-empty provenance result. Optional semantic
+checks cover article word count, title, access status, and resolved strategy.
 Publish the corpus revision, target authorisation, failed assertions, and raw
 JSON with any extraction-quality claim. `pagePassRate` and
 `assertionPassRate` measure the supplied checks; they are not a substitute for

@@ -60,6 +60,12 @@ export class CacheStore {
       );
     await this.evict();
   }
+  async remove(key: string): Promise<void> {
+    const row = this.db
+      .prepare("SELECT path FROM cache_entries WHERE key = ?")
+      .get(key) as SqlRow | undefined;
+    if (row) await this.delete(key, String(row.path));
+  }
   async purge(value?: string): Promise<number> {
     const rows = (
       value

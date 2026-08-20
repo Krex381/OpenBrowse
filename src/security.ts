@@ -56,6 +56,19 @@ export async function assertSafeUrl(
   value: string,
   allowedDomains?: readonly string[],
 ): Promise<URL> {
+  return (await resolveSafeUrl(value, allowedDomains)).url;
+}
+
+export interface SafeUrlResolution {
+  url: URL;
+  addresses: Array<{ address: string; family: 4 | 6 }>;
+}
+
+export async function resolveSafeUrl(
+  value: string,
+  allowedDomains?: readonly string[],
+  resolver: typeof lookup = lookup,
+): Promise<SafeUrlResolution> {
   let url: URL;
   try {
     url = new URL(value);
@@ -103,11 +116,11 @@ export async function assertSafeUrl(
         "Private or reserved IP targets are blocked",
         403,
       );
-    return url;
+    return { url, addresses: [{ address: hostname, family: isIP(hostname) as 4 | 6 }] };
   }
   let addresses: Awaited<ReturnType<typeof lookup>>[];
   try {
-    addresses = await lookup(hostname, { all: true, verbatim: true });
+    addresses = await resolver(hostname, { all: true, verbatim: true });
   } catch {
     throw new OpenBrowseError(
       "TARGET_NETWORK_ERROR",
@@ -125,13 +138,21 @@ export async function assertSafeUrl(
       "Target resolves to a private or reserved IP address",
       403,
     );
-  return url;
+  return {
+    url,
+    addresses: addresses.map(({ address, family }) => ({
+      address,
+      family: family as 4 | 6,
+    })),
+  };
 }
 
 export function normalizeUrl(value: string): string {
   const url = new URL(value);
   url.hash = "";
   url.hostname = url.hostname.toLowerCase();
+  for (const key of [...url.searchParams.keys()])
+    if (/^_?_?cf_chl_/i.test(key)) url.searchParams.delete(key);
   if (
     (url.protocol === "https:" && url.port === "443") ||
     (url.protocol === "http:" && url.port === "80")

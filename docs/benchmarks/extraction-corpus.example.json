@@ -6,7 +6,11 @@
       "markdownIncludes": ["Example Domain"],
       "markdownExcludes": ["Cookie settings"],
       "minimumMarkdownChars": 20,
-      "minimumLinks": 1
+      "minimumLinks": 1,
+      "minimumArticleWords": 10,
+      "titleIncludes": "Example Domain",
+      "accessStatus": "open",
+      "expectedStrategy": "http"
     }
   }
 ]

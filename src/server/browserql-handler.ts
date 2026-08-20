@@ -1,11 +1,16 @@
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { config } from "../config.js";
+import { assertBoundedJson } from "../bounds.js";
 import { OpenBrowseError } from "../errors.js";
-import type { SessionManager } from "../execution.js";
+import {
+  browserBackendIds,
+  type BrowserBackendId,
+  type SessionManager,
+} from "../execution.js";
 import type { AdmissionQueue } from "../queue.js";
 import type { StoredProxy, StoredSession, Storage } from "../storage.js";
-import { parse } from "./input.js";
+import { browserBackendOptions, parse } from "./input.js";
 import { parseBql, selectBqlResponse, type BqlField } from "./browserql.js";
 
 export function createBqlHandler(input: {
@@ -49,6 +54,8 @@ export function createBqlHandler(input: {
           .string()
           .regex(/^prf_[a-z0-9]+$/)
           .optional(),
+        browserBackend: z.enum(browserBackendIds).optional(),
+        browserOptions: browserBackendOptions.optional(),
       }),
       request.body,
     );
@@ -75,96 +82,178 @@ export function createBqlHandler(input: {
         "Browser profile does not exist",
         404,
       );
+    if (
+      body.browserOptions &&
+      body.browserBackend &&
+      body.browserBackend !== "cloakbrowser-chromium" &&
+      body.browserBackend !== "camoufox-firefox" &&
+      body.browserBackend !== "clearcote-chromium"
+    )
+      throw new OpenBrowseError(
+        "INVALID_REQUEST",
+        "BrowserQL browserOptions apply only to CloakBrowser, Camoufox, and Clearcote attempts",
+        400,
+      );
+    const solveRequested = fields.some((field) => field.name === "solve");
+    const preferred = body.browserBackend ?? config.defaultBrowserBackend;
+    const candidates = [
+      preferred,
+      ...(solveRequested
+        ? ([
+            "patchright-chromium",
+            "clearcote-chromium",
+            "camoufox-firefox",
+            "cloakbrowser-chromium",
+          ] as const)
+        : []),
+    ].filter(
+      (backend, index, all): backend is BrowserBackendId =>
+        config.enabledBrowserBackends.has(backend) &&
+        all.indexOf(backend) === index,
+    );
     const scheduled = await queue.run(async () => {
-      const session = storage.createSession({
-        ownerKeyHash,
-        persistent: false,
-        expiresAt: Date.now() + Math.min(config.jobTimeoutMs, 60000),
-        viewport: { width: 1280, height: 720 },
-        ...(profile ? { storageState: profile.storageState } : {}),
-      });
-      try {
-        const live = await sessions.get(
-          session,
-          await resolveProxy(session.proxyId, ownerKeyHash),
-        );
-        const network = {
-          requests: [] as Array<{ url: string; method: string }>,
-          responses: [] as Array<{
-            url: string;
-            status: number;
-            contentType?: string;
-            body?: string;
-            bodyTruncated?: boolean;
-          }>,
-          pending: [] as Promise<void>[],
-          captureBodies: fields.some(
-            (field) => field.name === "network" && field.args.captureBodies === true,
-          ),
-        };
-        bqlNetwork.set(session.id, network);
-        live.page.on("request", (pageRequest) => {
-          if (network.requests.length < 200)
-            network.requests.push({
-              url: pageRequest.url(),
-              method: pageRequest.method(),
-            });
+      const backendAttempts: BrowserBackendId[] = [];
+      let finalResult: {
+        data: Record<string, unknown>;
+        selectedBackend: BrowserBackendId;
+        challengeRemaining: boolean;
+      } | undefined;
+      let lastUnavailable: OpenBrowseError | undefined;
+      for (const backend of candidates) {
+        backendAttempts.push(backend);
+        const session = storage.createSession({
+          ownerKeyHash,
+          persistent: false,
+          expiresAt: Date.now() + Math.min(config.jobTimeoutMs, 60000),
+          viewport: { width: 1280, height: 720 },
+          ...(profile ? { storageState: profile.storageState } : {}),
         });
-        live.page.on("response", (response) => {
-          if (network.responses.length < 200) {
-            const record: (typeof network.responses)[number] = {
-              url: response.url(),
-              status: response.status(),
-              contentType: response.headers()["content-type"],
-            };
-            network.responses.push(record);
-            if (
-              network.captureBodies &&
-              /^text\/|json|javascript|xml/i.test(record.contentType ?? "") &&
-              network.pending.length < 50
-            ) {
-              const task = response
-                .body()
-                .then((body) => {
-                  const limit = Math.min(1024 * 1024, config.maxResponseBytes);
-                  record.body = body.subarray(0, limit).toString("utf8");
-                  record.bodyTruncated = body.length > limit;
-                })
-                .catch(() => undefined);
-              network.pending.push(task);
+        try {
+          const live = await sessions.get(
+            session,
+            await resolveProxy(session.proxyId, ownerKeyHash),
+            undefined,
+            backend,
+            backend === "cloakbrowser-chromium" ||
+            backend === "camoufox-firefox" ||
+            backend === "clearcote-chromium"
+              ? body.browserOptions
+              : undefined,
+          );
+          const network = {
+            requests: [] as Array<{ url: string; method: string }>,
+            responses: [] as Array<{
+              url: string;
+              status: number;
+              contentType?: string;
+              body?: string;
+              bodyTruncated?: boolean;
+            }>,
+            pending: [] as Promise<void>[],
+            captureBodies: fields.some(
+              (field) =>
+                field.name === "network" && field.args.captureBodies === true,
+            ),
+          };
+          bqlNetwork.set(session.id, network);
+          live.page.on("request", (pageRequest) => {
+            if (network.requests.length < 200)
+              network.requests.push({
+                url: pageRequest.url(),
+                method: pageRequest.method(),
+              });
+          });
+          live.page.on("response", (response) => {
+            if (network.responses.length < 200) {
+              const record: (typeof network.responses)[number] = {
+                url: response.url(),
+                status: response.status(),
+                contentType: response.headers()["content-type"],
+              };
+              network.responses.push(record);
+              if (
+                network.captureBodies &&
+                /^text\/|json|javascript|xml/i.test(record.contentType ?? "") &&
+                network.pending.length < 50
+              ) {
+                const task = response
+                  .body()
+                  .then((responseBody) => {
+                    const limit = Math.min(
+                      1024 * 1024,
+                      config.maxResponseBytes,
+                    );
+                    record.body = responseBody
+                      .subarray(0, limit)
+                      .toString("utf8");
+                    record.bodyTruncated = responseBody.length > limit;
+                  })
+                  .catch(() => undefined);
+                network.pending.push(task);
+              }
             }
+          });
+          const data: Record<string, unknown> = {};
+          let challengeRemaining = false;
+          for (const field of fields) {
+            const started = Date.now();
+            const result = await executeBqlField(session, field);
+            if (
+              field.name === "solve" &&
+              result &&
+              typeof result === "object" &&
+              (result as Record<string, unknown>).retryRecommended === true
+            )
+              challengeRemaining = true;
+            const timed =
+              result &&
+              typeof result === "object" &&
+              !Array.isArray(result) &&
+              !("time" in result)
+                ? {
+                    ...(result as Record<string, unknown>),
+                    time: Date.now() - started,
+                  }
+                : result;
+            data[field.key] = selectBqlResponse(timed, field.selection);
           }
-        });
-        const data: Record<string, unknown> = {};
-        for (const field of fields) {
-          const started = Date.now();
-          const result = await executeBqlField(session, field);
-          const timed =
-            result &&
-            typeof result === "object" &&
-            !Array.isArray(result) &&
-            !("time" in result)
-              ? {
-                  ...(result as Record<string, unknown>),
-                  time: Date.now() - started,
-                }
-              : result;
-          data[field.key] = selectBqlResponse(timed, field.selection);
+          finalResult = { data, selectedBackend: backend, challengeRemaining };
+          if (!challengeRemaining) break;
+        } catch (error) {
+          if (
+            error instanceof OpenBrowseError &&
+            error.code === "BROWSER_BACKEND_UNAVAILABLE"
+          ) {
+            lastUnavailable = error;
+            continue;
+          }
+          throw error;
+        } finally {
+          bqlNetwork.delete(session.id);
+          await sessions.close(session.id);
+          await storage.deleteSession(session.id);
         }
-        return data;
-      } finally {
-        bqlNetwork.delete(session.id);
-        await sessions.close(session.id);
-        await storage.deleteSession(session.id);
       }
+      if (!finalResult)
+        throw (
+          lastUnavailable ??
+          new OpenBrowseError(
+            "BROWSER_BACKEND_DISABLED",
+            "No configured browser backend can execute this BrowserQL request",
+            409,
+          )
+        );
+      return { ...finalResult, backendAttempts };
     }, "workflow");
-    return {
-      data: scheduled.result,
+    return assertBoundedJson({
+      data: scheduled.result.data,
       extensions: {
         engine: "openbrowse-browserql-safe",
         queueMs: scheduled.queueMs,
-        bypass: "disabled",
+        backendAttempts: scheduled.result.backendAttempts,
+        selectedBackend: scheduled.result.selectedBackend,
+        challengeRemaining: scheduled.result.challengeRemaining,
       },
-    };
+    }, "BrowserQL response");
   };
 }

@@ -5,6 +5,8 @@ import { extract, pdf, screenshot, type BrowserPool } from "../../execution.js";
 import type { AdmissionQueue } from "../../queue.js";
 import { sendBinary, statusCard } from "../presentation.js";
 import {
+  browserBackend,
+  browserBackendOptions,
   parse,
   selector,
   strategy,
@@ -149,6 +151,8 @@ export function registerContentRoutes(input: {
         waitUntil: z
           .enum(["load", "domcontentloaded", "networkidle"])
           .optional(),
+        browserBackend: browserBackend.optional(),
+        browserOptions: browserBackendOptions.optional(),
         proxyId: z.string().optional(),
       }),
       request.body,
@@ -218,6 +222,8 @@ export function registerContentRoutes(input: {
           .min(100)
           .max(config.jobTimeoutMs)
           .optional(),
+        browserBackend: browserBackend.optional(),
+        browserOptions: browserBackendOptions.optional(),
         proxyId: z.string().optional(),
       }),
       request.body,

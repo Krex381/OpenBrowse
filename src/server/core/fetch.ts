@@ -11,6 +11,7 @@ import type { StoredProxy, Storage } from "../../storage.js";
 import type { Cache } from "../../cache.js";
 import type { ApiFetch } from "../input.js";
 import type { FetchResponse } from "../execution-core.js";
+import { recordFetchObservation } from "../../telemetry.js";
 
 export function createFetchService(input: {
   storage: Storage;
@@ -45,6 +46,8 @@ export function createFetchService(input: {
       ...(body.waitUntil ? { waitUntil: body.waitUntil } : {}),
       ...(body.wait ? { wait: body.wait } : {}),
       ...(body.viewport ? { viewport: body.viewport } : {}),
+      ...(body.browserBackend ? { browserBackend: body.browserBackend } : {}),
+      ...(body.browserOptions ? { browserOptions: body.browserOptions } : {}),
       ...(proxy ? { proxy } : {}),
     };
     await assertSafeUrl(body.url, proxy?.allowedDomains);
@@ -56,6 +59,8 @@ export function createFetchService(input: {
       headers: body.headers ?? {},
       waitUntil: body.waitUntil,
       wait: body.wait,
+      browserBackend: body.browserBackend,
+      browserOptions: body.browserOptions,
     });
     const cacheable =
       body.cache.mode === "default" &&
@@ -66,16 +71,41 @@ export function createFetchService(input: {
       const hit = await cache.get(key);
       if (hit) {
         const response = JSON.parse(hit.body.toString("utf8")) as FetchResponse;
-        return { ...response, cache: { hit: true, key, layer: hit.layer } };
+        if (response.execution.challengeRemaining) await cache.delete(key);
+        else {
+          recordFetchObservation({
+            cacheHit: true,
+            strategy: response.strategy,
+            plannerReason: response.execution.plan.reason,
+            ...(response.execution.selectedBackend
+              ? { backend: response.execution.selectedBackend }
+              : {}),
+          });
+          return { ...response, cache: { hit: true, key, layer: hit.layer } };
+        }
       }
     }
     const compute = async () => {
       const totalStarted = Date.now();
       const scheduled = await queue.run(
         () => adaptiveFetch(pool, input),
-        input.strategy === "http" ? "http" : "browser",
+        input.strategy === "browser" ? "browser" : "http",
       );
       const result = scheduled.result;
+      const resultCacheable =
+        cacheable && result.execution.challengeRemaining !== true;
+      result.execution.plan.cacheEligible = resultCacheable;
+      result.execution.plan.cacheEligibility = {
+        eligible: resultCacheable,
+        reason:
+          result.execution.challengeRemaining
+            ? "challenge-response"
+            : cacheable
+            ? "public-request"
+            : body.cache.mode !== "default"
+            ? "caller-disabled"
+            : "private-request-headers",
+      };
       const response = {
         requestId: "",
         status: result.status,
@@ -87,8 +117,15 @@ export function createFetchService(input: {
         timings: {
           queueMs: scheduled.queueMs,
           fetchMs: result.fetchMs,
+          httpMs: result.execution.timings.httpMs,
+          browserAcquireMs: result.execution.timings.browserAcquireMs,
+          navigationMs: result.execution.timings.navigationMs,
+          settleMs: result.execution.timings.settleMs,
+          extractionMs: result.execution.timings.extractionMs,
+          browserMs: result.execution.timings.browserMs,
           totalMs: Date.now() - totalStarted,
         },
+        execution: result.execution,
         cache: { hit: false, key },
         resourceUsage: {
           strategy: result.strategy,
@@ -101,7 +138,15 @@ export function createFetchService(input: {
           ),
         },
       };
-      if (cacheable)
+      recordFetchObservation({
+        cacheHit: false,
+        strategy: result.strategy,
+        plannerReason: result.execution.plan.reason,
+        ...(result.execution.selectedBackend
+          ? { backend: result.execution.selectedBackend }
+          : {}),
+      });
+      if (resultCacheable)
         await cache.put(
           key,
           Buffer.from(JSON.stringify(response)),

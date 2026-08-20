@@ -1,12 +1,13 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, type BrowserContext } from "playwright";
-import { chromiumExtensionArgs, config } from "../config.js";
+import { config } from "../config.js";
+import { assertBoundedBuffer } from "../bounds.js";
 import { OpenBrowseError } from "../errors.js";
 import { assertSafeUrl, normalizeUrl } from "../security.js";
 import { BrowserPool } from "./pool.js";
-import { proxySettings, timeout } from "./shared.js";
+import { hasAccessChallenge, timeout } from "./shared.js";
+import { runChallengeFallback } from "./challenge-fallback.js";
 import type { FetchInput } from "./types.js";
 
 export async function screenshot(
@@ -18,23 +19,40 @@ export async function screenshot(
   },
 ): Promise<Buffer> {
   await assertSafeUrl(input.url, input.proxy?.allowedDomains);
-  return pool.withContext(
-    input.viewport,
-    input.proxy,
-    async (_context, page) => {
-      await page.goto(input.url, {
-        waitUntil: input.waitUntil ?? "networkidle",
-        timeout: timeout(input.timeoutMs),
-      });
-      return page.screenshot({
-        type: input.format === "jpeg" ? "jpeg" : "png",
-        fullPage: input.fullPage ?? true,
-        ...(input.format === "jpeg" && input.quality
-          ? { quality: input.quality }
-          : {}),
-      });
+  const fallback = await runChallengeFallback(
+    pool,
+    input,
+    input.browserBackend ?? config.defaultBrowserBackend,
+    async (backend, backendOptions) => {
+      const value = await pool.withContext(
+        input.viewport,
+        input.proxy,
+        async (_context, page) => {
+          await page.goto(input.url, {
+            waitUntil: input.waitUntil ?? "networkidle",
+            timeout: timeout(input.timeoutMs),
+          });
+          const challengeDetected = hasAccessChallenge(await page.content());
+          const body = assertBoundedBuffer(
+            await page.screenshot({
+              type: input.format === "jpeg" ? "jpeg" : "png",
+              fullPage: input.fullPage ?? true,
+              ...(input.format === "jpeg" && input.quality
+                ? { quality: input.quality }
+                : {}),
+            }),
+            "Screenshot",
+          );
+          return { body, challengeDetected };
+        },
+        backend,
+        backendOptions,
+      );
+      return { value, challengeDetected: value.challengeDetected };
     },
+    "screenshots",
   );
+  return fallback.value.body;
 }
 
 export async function pdf(
@@ -47,84 +65,106 @@ export async function pdf(
   },
 ): Promise<Buffer> {
   await assertSafeUrl(input.url, input.proxy?.allowedDomains);
-  return pool.withContext(
-    input.viewport,
-    input.proxy,
-    async (_context, page) => {
-      await page.goto(input.url, {
-        waitUntil: input.waitUntil ?? "networkidle",
-        timeout: timeout(input.timeoutMs),
-      });
-      return page.pdf({
-        format: input.format ?? "A4",
-        landscape: input.landscape ?? false,
-        printBackground: input.printBackground ?? true,
-        ...(input.margin ? { margin: input.margin } : {}),
-      });
+  const fallback = await runChallengeFallback(
+    pool,
+    input,
+    input.browserBackend ?? config.defaultBrowserBackend,
+    async (backend, backendOptions) => {
+      const value = await pool.withContext(
+        input.viewport,
+        input.proxy,
+        async (_context, page) => {
+          await page.goto(input.url, {
+            waitUntil: input.waitUntil ?? "networkidle",
+            timeout: timeout(input.timeoutMs),
+          });
+          const challengeDetected = hasAccessChallenge(await page.content());
+          const body = assertBoundedBuffer(
+            await page.pdf({
+              format: input.format ?? "A4",
+              landscape: input.landscape ?? false,
+              printBackground: input.printBackground ?? true,
+              ...(input.margin ? { margin: input.margin } : {}),
+            }),
+            "PDF",
+          );
+          return { body, challengeDetected };
+        },
+        backend,
+        backendOptions,
+      );
+      return { value, challengeDetected: value.challengeDetected };
     },
+    "pdf",
   );
+  return fallback.value.body;
 }
 
 export async function recordVideo(
+  pool: BrowserPool,
   input: FetchInput & { durationMs?: number },
-): Promise<{ body: Buffer; finalUrl: string }> {
+): Promise<{
+  body: Buffer;
+  finalUrl: string;
+  execution: {
+    backendAttempts: string[];
+    selectedBackend: string;
+    challengeRemaining: boolean;
+  };
+}> {
   await assertSafeUrl(input.url, input.proxy?.allowedDomains);
   const directory = await mkdtemp(join(tmpdir(), "openbrowse-video-"));
-  const browser = await chromium.launch({
-    headless: true,
-    chromiumSandbox: config.chromiumSandbox,
-    args: chromiumExtensionArgs,
-  });
-  let context: BrowserContext | undefined;
   try {
     const size = {
       width: input.viewport?.width ?? 1280,
       height: input.viewport?.height ?? 720,
     };
-    context = await browser.newContext({
-      viewport: size,
-      recordVideo: { dir: directory, size },
-      serviceWorkers: "block",
-      ...(input.proxy ? { proxy: proxySettings(input.proxy) } : {}),
-    });
-    await context.route("**/*", async (route) => {
-      try {
-        await assertSafeUrl(route.request().url(), input.proxy?.allowedDomains);
-        await route.continue();
-      } catch {
-        await route.abort("blockedbyclient");
-      }
-    });
-    const page = await context.newPage();
-    const video = page.video();
-    await page.goto(input.url, {
-      waitUntil: input.waitUntil ?? "domcontentloaded",
-      timeout: timeout(input.timeoutMs),
-    });
-    const html = await page.content();
-    if (/captcha|recaptcha|hcaptcha|cf-chl-/i.test(html))
-      throw new OpenBrowseError(
-        "CAPTCHA_DETECTED",
-        "A challenge was detected and the configured policy is fail",
-        423,
-      );
-    await new Promise((resolve) =>
-      setTimeout(
-        resolve,
-        Math.min(Math.max(input.durationMs ?? 1500, 0), 10000),
-      ),
+    const fallback = await runChallengeFallback(
+      pool,
+      input,
+      input.browserBackend ?? config.defaultBrowserBackend,
+      async (backend, backendOptions) => {
+        const value = await pool.withContext(
+          input.viewport,
+          input.proxy,
+          async (_context, page) => {
+            const video = page.video();
+            await page.goto(input.url, {
+              waitUntil: input.waitUntil ?? "domcontentloaded",
+              timeout: timeout(input.timeoutMs),
+            });
+            const challengeDetected = hasAccessChallenge(await page.content());
+            if (!challengeDetected)
+              await new Promise((resolve) =>
+                setTimeout(
+                  resolve,
+                  Math.min(Math.max(input.durationMs ?? 1500, 0), 10000),
+                ),
+              );
+            return {
+              video,
+              finalUrl: normalizeUrl(page.url()),
+              challengeDetected,
+            };
+          },
+          backend,
+          backendOptions,
+          { recordVideo: { dir: directory, size } },
+        );
+        return { value, challengeDetected: value.challengeDetected };
+      },
+      "recordings",
     );
-    const finalUrl = normalizeUrl(page.url());
-    await context.close();
-    context = undefined;
-    const path = await video?.path();
-    if (!path)
+    const video = fallback.value.video;
+    if (!video)
       throw new OpenBrowseError(
         "RENDER_FAILED",
         "Browser did not produce a video recording",
         422,
         true,
       );
+    const path = join(directory, `${crypto.randomUUID()}.webm`);
+    await video.saveAs(path);
     const body = await readFile(path);
     if (body.length > config.maxResponseBytes)
       throw new OpenBrowseError(
@@ -132,7 +172,15 @@ export async function recordVideo(
         "Recording exceeds the configured artifact byte limit",
         413,
       );
-    return { body, finalUrl };
+    return {
+      body,
+      finalUrl: fallback.value.finalUrl,
+      execution: {
+        backendAttempts: fallback.backendAttempts,
+        selectedBackend: fallback.selectedBackend,
+        challengeRemaining: fallback.challengeRemaining,
+      },
+    };
   } catch (error: unknown) {
     if (error instanceof OpenBrowseError) throw error;
     if (error instanceof Error && /Timeout/i.test(error.message))
@@ -147,10 +195,9 @@ export async function recordVideo(
       "Video recording failed",
       422,
       true,
+      { cause: error instanceof Error ? error.message : "unknown error" },
     );
   } finally {
-    await context?.close().catch(() => undefined);
-    await browser.close().catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
   }
 }

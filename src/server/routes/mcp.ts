@@ -82,12 +82,12 @@ export function registerMcpRoutes(input: {
       return mcpReply(id, {
         protocolVersion: "2025-06-18",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "openbrowse", version: "0.1.0" },
+        serverInfo: { name: "openbrowse", version: "0.2.0" },
       });
     if (message.method === "server/discover")
       return mcpReply(id, {
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "openbrowse", version: "0.1.0" },
+        serverInfo: { name: "openbrowse", version: "0.2.0" },
       });
     if (message.method === "ping") return mcpReply(id, {});
     if (message.method === "tools/list")
@@ -207,8 +207,8 @@ export function registerMcpRoutes(input: {
             url,
             strategy: z.enum(["auto", "http", "browser"]).default("auto"),
             output: z
-              .array(z.enum(["html", "markdown", "links"]))
-              .max(3)
+              .array(z.enum(["html", "text", "markdown", "links", "metadata", "article", "provenance"]))
+              .max(7)
               .default(["markdown"]),
             wait: browserWait.optional(),
           }),
@@ -253,6 +253,7 @@ export function registerMcpRoutes(input: {
             url,
             maxUrls: z.number().int().min(1).max(1000).optional(),
             maxDepth: z.number().int().min(0).max(10).optional(),
+            render: z.enum(["auto", "http", "browser"]).default("auto"),
           }),
           params.arguments,
         );

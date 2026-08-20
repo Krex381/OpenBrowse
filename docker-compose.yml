@@ -9,10 +9,25 @@ services:
       OPENBROWSE_DATA_DIR: /data
       OPENBROWSE_MAX_CONCURRENCY: "4"
       OPENBROWSE_BROWSER_POOL_MAX: "2"
+      OPENBROWSE_BROWSER_BACKENDS: ${OPENBROWSE_BROWSER_BACKENDS:-playwright-chromium,patchright-chromium}
+      OPENBROWSE_DEFAULT_BROWSER_BACKEND: ${OPENBROWSE_DEFAULT_BROWSER_BACKEND:-playwright-chromium}
+      OPENBROWSE_CLOAKBROWSER_LICENSE_ACCEPTED: ${OPENBROWSE_CLOAKBROWSER_LICENSE_ACCEPTED:-false}
+      CLOAKBROWSER_LICENSE_KEY: ${CLOAKBROWSER_LICENSE_KEY:-}
+      CLOAKBROWSER_VERSION: ${CLOAKBROWSER_VERSION:-}
+      CLOAKBROWSER_RELEASE_CHANNEL: ${CLOAKBROWSER_RELEASE_CHANNEL:-stable}
+      CLOAKBROWSER_AUTO_UPDATE: ${CLOAKBROWSER_AUTO_UPDATE:-false}
+      CLOAKBROWSER_CACHE_DIR: /data/cloakbrowser
+      CAMOUFOX_INSTALL_DIR: /data/camoufox
+      OPENBROWSE_CLEARCOTE_EXECUTABLE_PATH: ${OPENBROWSE_CLEARCOTE_EXECUTABLE_PATH:-}
+      OPENBROWSE_BROWSER_HEADLESS: ${OPENBROWSE_BROWSER_HEADLESS:-true}
       OPENBROWSE_CHROMIUM_SANDBOX: "true"
       OPENBROWSE_VNC_BRIDGE_URL: ws://127.0.0.1:6080
     volumes: ["openbrowse-data:/data"]
-    tmpfs: ["/tmp:rw,nosuid,nodev,size=256m"]
+    tmpfs:
+      - "/tmp:rw,nosuid,nodev,size=256m,mode=1777"
+      # Xorg requires this socket directory to be root-owned even though Xvfb,
+      # x11vnc, websockify, Node, and every browser run as UID 10001.
+      - "/tmp/.X11-unix:rw,nosuid,nodev,size=1m,mode=1777,uid=0,gid=0"
     shm_size: "1gb"
     mem_limit: "2g"
     cpus: 2

@@ -1,10 +1,11 @@
 import { ZipFile } from "yazl";
 import { load } from "cheerio";
-import { fetch as undiciFetch } from "undici";
+import { Agent, fetch as undiciFetch } from "undici";
 import { adaptiveFetch, BrowserPool, type FetchInput } from "../execution.js";
+import { pinnedAgent, readBoundedResponse } from "../execution/http.js";
 import { egressProxyAgent } from "../execution/shared.js";
 import { OpenBrowseError } from "../errors.js";
-import { assertSafeUrl, normalizeUrl } from "../security.js";
+import { assertSafeUrl, normalizeUrl, resolveSafeUrl } from "../security.js";
 
 export interface MapOptions {
   maxUrls?: number;
@@ -12,16 +13,23 @@ export interface MapOptions {
   include?: string[];
   exclude?: string[];
   search?: string;
+  render?: "auto" | "http" | "browser";
 }
 export interface MappedUrl {
   url: string;
   depth: number;
-  source: "seed" | "link";
+  source: "seed" | "link" | "rendered-link" | "interactive-view";
+  control?: { role: "tab" | "link"; label?: string };
 }
+const unsafeAction = /\b(?:buy|checkout|delete|remove|logout|log\s*out|pay|purchase|submit|confirm|unsubscribe|cancel\s+account)\b/i;
+const globMatches = (url: string, pattern: string): boolean => {
+  const escaped = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replaceAll("*", ".*");
+  return new RegExp(`^${escaped}$`, "u").test(url);
+};
 const matches = (url: string, patterns: string[] | undefined): boolean =>
-  !patterns ||
-  patterns.length === 0 ||
-  patterns.some((pattern) => new RegExp(pattern).test(url));
+  !patterns || patterns.length === 0 || patterns.some((pattern) => globMatches(url, pattern));
 
 export async function mapSite(
   pool: BrowserPool,
@@ -43,9 +51,7 @@ export async function mapSite(
     await assertSafeUrl(current.url);
     if (
       !matches(current.url, options.include) ||
-      (options.exclude?.some((pattern) =>
-        new RegExp(pattern).test(current.url),
-      ) ??
+      (options.exclude?.some((pattern) => globMatches(current.url, pattern)) ??
         false)
     )
       continue;
@@ -53,13 +59,13 @@ export async function mapSite(
     if (current.depth >= maxDepth) continue;
     const result = await adaptiveFetch(pool, {
       url: current.url,
-      strategy: "http",
+      strategy: options.render ?? "auto",
       timeoutMs: 10000,
     });
     if (!result.html) continue;
     const $ = load(result.html);
-    $("a[href]").each((_index, element) => {
-      const href = $(element).attr("href");
+    $("a[href],[data-href]").each((_index, element) => {
+      const href = $(element).attr("href") ?? $(element).attr("data-href");
       if (!href) return;
       try {
         const next = new URL(href, current.url);
@@ -72,18 +78,60 @@ export async function mapSite(
           pending.push({
             url: normalizeUrl(next.toString()),
             depth: current.depth + 1,
-            source: "link",
+            source: result.strategy === "browser" ? "rendered-link" : "link",
           });
       } catch {
         /* invalid links are intentionally ignored */
       }
     });
+    $("[role='tab'][aria-controls],[role='link'][data-href],button[data-href]").each(
+      (_index, element) => {
+        if (results.length >= maximum) return false;
+        const label = cleanControlLabel(
+          $(element).attr("aria-label") ?? $(element).text(),
+        );
+        if (unsafeAction.test(label)) return;
+        const role = $(element).attr("role") === "tab" ? "tab" : "link";
+        const dataHref = $(element).attr("data-href");
+        if (dataHref) {
+          try {
+            const next = new URL(dataHref, current.url);
+            if (next.origin === origin && /^https?:$/.test(next.protocol))
+              pending.push({
+                url: normalizeUrl(next.toString()),
+                depth: current.depth + 1,
+                source: "rendered-link",
+                control: { role, ...(label ? { label } : {}) },
+              });
+          } catch {
+            /* malformed client route is ignored */
+          }
+          return;
+        }
+        const controlled = $(element).attr("aria-controls");
+        if (!controlled || !/^[-_a-zA-Z0-9:.]+$/.test(controlled)) return;
+        const viewUrl = `${current.url.split("#", 1)[0]}#${controlled}`;
+        const key = `view:${viewUrl}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        results.push({
+          url: viewUrl,
+          depth: current.depth,
+          source: "interactive-view",
+          control: { role: "tab", ...(label ? { label } : {}) },
+        });
+      },
+    );
   }
   return options.search
     ? results.filter((item) =>
         item.url.toLowerCase().includes(options.search!.toLowerCase()),
       )
     : results;
+}
+
+function cleanControlLabel(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, 160);
 }
 
 export async function exportUrl(
@@ -158,16 +206,20 @@ async function safeNativeFetch(
   value: string,
   timeoutMs: number,
 ): Promise<{ body: Buffer; contentType: string; finalUrl: string }> {
-  let target = await assertSafeUrl(value);
+  let resolution = await resolveSafeUrl(value);
+  let target = resolution.url;
   let response: Response | undefined;
-  const dispatcher = egressProxyAgent();
+  const proxyAgent = egressProxyAgent();
+  const directAgents: Agent[] = [];
   try {
     for (let redirects = 0; redirects <= 5; redirects++) {
       try {
+        const dispatcher = proxyAgent ?? pinnedAgent(resolution.addresses);
+        if (dispatcher instanceof Agent) directAgents.push(dispatcher);
         response = await undiciFetch(target, {
           redirect: "manual",
           signal: AbortSignal.timeout(timeoutMs),
-          ...(dispatcher ? { dispatcher } : {}),
+          dispatcher,
         });
       } catch {
         throw new OpenBrowseError(
@@ -185,7 +237,9 @@ async function safeNativeFetch(
           "Target exceeded the redirect limit",
           502,
         );
-      target = await assertSafeUrl(new URL(location, target).toString());
+      await response.body?.cancel();
+      resolution = await resolveSafeUrl(new URL(location, target).toString());
+      target = resolution.url;
     }
     if (!response?.ok)
       throw new OpenBrowseError(
@@ -194,13 +248,7 @@ async function safeNativeFetch(
         502,
         true,
       );
-    const body = Buffer.from(await response.arrayBuffer());
-    if (body.length > 10 * 1024 * 1024)
-      throw new OpenBrowseError(
-        "PAYLOAD_TOO_LARGE",
-        "Export target exceeds 10 MiB limit",
-        413,
-      );
+    const body = await readBoundedResponse(response);
     return {
       body,
       contentType:
@@ -208,6 +256,7 @@ async function safeNativeFetch(
       finalUrl: normalizeUrl(response.url || target.toString()),
     };
   } finally {
-    await dispatcher?.close();
+    await proxyAgent?.close();
+    await Promise.all(directAgents.map((agent) => agent.close()));
   }
 }

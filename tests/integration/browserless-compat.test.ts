@@ -68,14 +68,16 @@ describe("Browserless migration aliases", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().urls[0].url).toContain("example.com");
   }, 30000);
-  it("describes bypass-sensitive features as disabled", async () => {
+  it("describes challenge handling as bounded backend escalation", async () => {
     const response = await services.app.inject({
       method: "GET",
       url: "/v1/capabilities",
       headers: { authorization: "Bearer dev-key" },
     });
     expect(response.statusCode).toBe(200);
-    expect(response.json().policies.captcha).toBe("detect-and-fail");
+    expect(response.json().policies.captcha).toBe(
+      "detect, bounded backend escalation, and authenticated human session handoff",
+    );
   });
   it("exports bounded offline bundles", async () => {
     const response = await services.app.inject({
@@ -229,6 +231,11 @@ describe("Browserless migration aliases", () => {
     });
     expect(recording.statusCode).toBe(200);
     expect(recording.json().contentType).toBe("video/webm");
+    expect(recording.json().execution).toMatchObject({
+      backendAttempts: ["playwright-chromium"],
+      selectedBackend: "playwright-chromium",
+      challengeRemaining: false,
+    });
     const artifact = await services.app.inject({
       method: "GET",
       url: recording.json().downloadPath,
@@ -263,6 +270,11 @@ describe("Browserless migration aliases", () => {
       heading: "Example Domain",
       more: "https://iana.org/domains/example",
     });
+    expect(response.json().execution).toMatchObject({
+      backendAttempts: ["playwright-chromium"],
+      selectedBackend: "playwright-chromium",
+      challengeRemaining: false,
+    });
   }, 30000);
   it("executes a safe BrowserQL mutation with aliases, variables, extraction, and screenshots", async () => {
     const response = await services.app.inject({
@@ -286,7 +298,11 @@ describe("Browserless migration aliases", () => {
         crop: { mimeType: "image/jpeg" },
         document: { mimeType: "application/pdf" },
       },
-      extensions: { engine: "openbrowse-browserql-safe", bypass: "disabled" },
+      extensions: {
+        engine: "openbrowse-browserql-safe",
+        selectedBackend: "playwright-chromium",
+        challengeRemaining: false,
+      },
     });
     expect(response.json().data.shot.bytes).toBeGreaterThan(1000);
     expect(response.json().data.shot.base64).toMatch(/^iVBOR/);
@@ -297,14 +313,21 @@ describe("Browserless migration aliases", () => {
     expect(response.json().data.document.size).toBeGreaterThan(1000);
     expect(response.json().data.document.base64).toMatch(/^JVBER/);
   }, 30000);
-  it("rejects BrowserQL CAPTCHA-solver mutations", async () => {
+  it("routes BrowserQL solve checks through the backend escalation policy", async () => {
     const response = await services.app.inject({
       method: "POST",
       url: "/chromium/bql?token=dev-key",
       payload: { query: "mutation { solve { found solved } }" },
     });
-    expect(response.statusCode).toBe(403);
-    expect(response.json().error.code).toBe("FEATURE_DISABLED");
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      data: { solve: { found: false, solved: true } },
+      extensions: {
+        backendAttempts: ["playwright-chromium"],
+        selectedBackend: "playwright-chromium",
+        challengeRemaining: false,
+      },
+    });
   });
   it("waits for a browser request through BrowserQL", async () => {
     const response = await services.app.inject({
@@ -357,12 +380,89 @@ describe("Browserless migration aliases", () => {
     expect(Date.parse(created.json().expiresAt) - Date.now()).toBeGreaterThan(
       7775000000,
     );
+    expect(created.json().executionPlan).toMatchObject({
+      strategy: "PERSISTENT_SESSION",
+      attemptBudget: 1,
+      cacheEligible: false,
+    });
     await services.app.inject({
       method: "DELETE",
       url: `/v1/sessions/${created.json().id}`,
       headers,
     });
   });
+  it("creates an atomic browser session and reports challenge handoff state", async () => {
+    const headers = { authorization: "Bearer dev-key" };
+    const created = await services.app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      headers,
+      payload: {
+        ttlSeconds: 120,
+        startUrl: "https://example.com",
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    expect(created.json()).toMatchObject({
+      navigation: {
+        status: 200,
+        finalUrl: "https://example.com/",
+        challengeDetected: false,
+      },
+      challenge: {
+        detected: false,
+        operatorControl: "commands",
+      },
+    });
+    const sessionId = created.json().id as string;
+    const challengePage = await services.app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/commands`,
+      headers,
+      payload: {
+        commands: [
+          {
+            method: "evaluate",
+            params: {
+              content:
+                "document.title='Just a moment...'; document.body.innerHTML='<div id=\"cf-chl-widget\">Checking</div>'; setTimeout(() => { document.title='Ready'; document.body.innerHTML='<main>Resolved</main>' }, 400); 'scheduled'",
+            },
+          },
+        ],
+      },
+    });
+    expect(challengePage.statusCode).toBe(200);
+    const detected = await services.app.inject({
+      method: "GET",
+      url: `/v1/sessions/${sessionId}/challenge`,
+      headers,
+    });
+    expect(detected.json()).toMatchObject({
+      detected: true,
+      resolved: false,
+      challengeRemaining: true,
+      clearanceCookiePresent: false,
+    });
+    const resumed = await services.app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/challenge/wait`,
+      headers,
+      payload: { timeoutMs: 3000, pollIntervalMs: 250 },
+    });
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json()).toMatchObject({
+      detected: false,
+      resolved: true,
+      challengeRemaining: false,
+      timedOut: false,
+    });
+    expect(resumed.json().waitedMs).toBeGreaterThanOrEqual(200);
+    await services.app.inject({
+      method: "DELETE",
+      url: `/v1/sessions/${sessionId}`,
+      headers,
+    });
+  }, 30000);
   it("captures an encrypted, tenant-isolated authenticated profile for new sessions", async () => {
     const headers = { authorization: "Bearer dev-key" };
     const profileName = `example-login-${Date.now()}`;

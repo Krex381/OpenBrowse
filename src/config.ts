@@ -7,9 +7,30 @@ import {
   int,
 } from "./config/environment.js";
 import { resolve } from "node:path";
+import {
+  browserBackendIds,
+  type BrowserBackendId,
+} from "./execution/types.js";
 export type { ApiKeyPolicy } from "./config/policies.js";
 
 const configuredPolicies = apiKeyPolicies();
+function configuredBrowserBackends(): ReadonlySet<BrowserBackendId> {
+  const raw = process.env.OPENBROWSE_BROWSER_BACKENDS ??
+    "playwright-chromium,patchright-chromium";
+  const values = raw.split(",").map((value) => value.trim()).filter(Boolean);
+  const allowed = new Set<string>(browserBackendIds);
+  for (const value of values)
+    if (!allowed.has(value))
+      throw new Error(
+        `OPENBROWSE_BROWSER_BACKENDS contains unsupported backend '${value}'`,
+      );
+  if (values.length === 0)
+    throw new Error("OPENBROWSE_BROWSER_BACKENDS must enable at least one backend");
+  return new Set(values as BrowserBackendId[]);
+}
+const enabledBrowserBackends = configuredBrowserBackends();
+const defaultBrowserBackend = (process.env.OPENBROWSE_DEFAULT_BROWSER_BACKEND ??
+  "playwright-chromium") as BrowserBackendId;
 export const config = {
   host: process.env.OPENBROWSE_HOST ?? "0.0.0.0",
   port: int("OPENBROWSE_PORT", 3000, 1, 65535),
@@ -45,6 +66,13 @@ export const config = {
     100,
     60000,
   ),
+  browserLaunchTimeoutMs: int(
+    "OPENBROWSE_BROWSER_LAUNCH_TIMEOUT_MS",
+    60000,
+    1000,
+    300000,
+  ),
+  browserHeadless: bool("OPENBROWSE_BROWSER_HEADLESS", true),
   memorySoftMb: int("OPENBROWSE_MEMORY_SOFT_MB", 1536, 64, 1048576),
   memoryHardMb: int("OPENBROWSE_MEMORY_HARD_MB", 1900, 64, 1048576),
   memoryReserveMb: int("OPENBROWSE_MEMORY_RESERVE_MB", 256, 0, 1048576),
@@ -105,6 +133,14 @@ export const config = {
   egressProxyUrl: process.env.OPENBROWSE_EGRESS_PROXY_URL ?? "",
   chromiumExtensionDirs: extensionDirs(),
   vncBridgeUrl: process.env.OPENBROWSE_VNC_BRIDGE_URL ?? "",
+  enabledBrowserBackends,
+  defaultBrowserBackend,
+  cloakBrowserLicenseAccepted: bool(
+    "OPENBROWSE_CLOAKBROWSER_LICENSE_ACCEPTED",
+    false,
+  ),
+  clearcoteExecutablePath:
+    process.env.OPENBROWSE_CLEARCOTE_EXECUTABLE_PATH?.trim() ?? "",
 } as const;
 export const chromiumExtensionArgs =
   config.chromiumExtensionDirs.length === 0
@@ -120,6 +156,21 @@ if (config.memoryHardMb <= config.memoryReserveMb)
 if (config.browserPoolMin > config.browserPoolMax)
   throw new Error(
     "OPENBROWSE_BROWSER_POOL_MIN must not exceed OPENBROWSE_BROWSER_POOL_MAX",
+  );
+if (!browserBackendIds.includes(config.defaultBrowserBackend))
+  throw new Error(
+    "OPENBROWSE_DEFAULT_BROWSER_BACKEND must name a supported backend",
+  );
+if (!config.enabledBrowserBackends.has(config.defaultBrowserBackend))
+  throw new Error(
+    "OPENBROWSE_DEFAULT_BROWSER_BACKEND must also be enabled by OPENBROWSE_BROWSER_BACKENDS",
+  );
+if (
+  config.enabledBrowserBackends.has("cloakbrowser-chromium") &&
+  !config.cloakBrowserLicenseAccepted
+)
+  throw new Error(
+    "OPENBROWSE_CLOAKBROWSER_LICENSE_ACCEPTED=true is required before enabling CloakBrowser; operators are responsible for the applicable binary and OEM/SaaS license",
   );
 if (config.apiKeys.size === 0)
   throw new Error(

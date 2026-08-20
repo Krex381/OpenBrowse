@@ -25,7 +25,16 @@ function validateCase(entry, index) {
     throw new Error(`Corpus entry ${index} requires an http(s) url`);
   if (!entry.expect || typeof entry.expect !== "object")
     throw new Error(`Corpus entry ${index} requires an expect object`);
-  const { markdownIncludes = [], markdownExcludes = [], minimumMarkdownChars = 1, minimumLinks = 0 } = entry.expect;
+  const {
+    markdownIncludes = [],
+    markdownExcludes = [],
+    minimumMarkdownChars = 1,
+    minimumLinks = 0,
+    minimumArticleWords = 0,
+    titleIncludes,
+    accessStatus,
+    expectedStrategy,
+  } = entry.expect;
   if (!Array.isArray(markdownIncludes) || !markdownIncludes.every((value) => typeof value === "string" && value))
     throw new Error(`Corpus entry ${index} has invalid markdownIncludes`);
   if (!Array.isArray(markdownExcludes) || !markdownExcludes.every((value) => typeof value === "string" && value))
@@ -34,10 +43,27 @@ function validateCase(entry, index) {
     throw new Error(`Corpus entry ${index} has invalid minimumMarkdownChars`);
   if (!Number.isInteger(minimumLinks) || minimumLinks < 0)
     throw new Error(`Corpus entry ${index} has invalid minimumLinks`);
+  if (!Number.isInteger(minimumArticleWords) || minimumArticleWords < 0)
+    throw new Error(`Corpus entry ${index} has invalid minimumArticleWords`);
+  if (titleIncludes !== undefined && (typeof titleIncludes !== "string" || !titleIncludes))
+    throw new Error(`Corpus entry ${index} has invalid titleIncludes`);
+  if (accessStatus !== undefined && !["open", "partial", "restricted", "unknown"].includes(accessStatus))
+    throw new Error(`Corpus entry ${index} has invalid accessStatus`);
+  if (expectedStrategy !== undefined && !["http", "browser"].includes(expectedStrategy))
+    throw new Error(`Corpus entry ${index} has invalid expectedStrategy`);
   return {
     id: typeof entry.id === "string" && entry.id ? entry.id : `page-${index + 1}`,
     url: entry.url,
-    expect: { markdownIncludes, markdownExcludes, minimumMarkdownChars, minimumLinks },
+    expect: {
+      markdownIncludes,
+      markdownExcludes,
+      minimumMarkdownChars,
+      minimumLinks,
+      minimumArticleWords,
+      ...(titleIncludes ? { titleIncludes } : {}),
+      ...(accessStatus ? { accessStatus } : {}),
+      ...(expectedStrategy ? { expectedStrategy } : {}),
+    },
   };
 }
 
@@ -56,18 +82,31 @@ async function fetchCase(entry) {
       body: JSON.stringify({
         url: entry.url,
         strategy: "auto",
-        output: ["markdown", "links"],
+        output: ["markdown", "links", "article", "provenance"],
         cache: { mode: "no-store", ttlSeconds: 1 },
       }),
     });
     const body = await response.json().catch(() => ({}));
     const markdown = typeof body.markdown === "string" ? body.markdown : "";
     const links = Array.isArray(body.links) ? body.links : [];
+    const article = body.article && typeof body.article === "object" ? body.article : {};
+    const strategy = body.execution?.strategyUsed ?? body.strategy ?? null;
     const checks = [
       ...entry.expect.markdownIncludes.map((value) => ({ name: `includes:${value}`, pass: markdown.includes(value) })),
       ...entry.expect.markdownExcludes.map((value) => ({ name: `excludes:${value}`, pass: !markdown.includes(value) })),
       { name: "minimumMarkdownChars", pass: markdown.length >= entry.expect.minimumMarkdownChars },
       { name: "minimumLinks", pass: links.length >= entry.expect.minimumLinks },
+      { name: "minimumArticleWords", pass: (article.wordCount ?? 0) >= entry.expect.minimumArticleWords },
+      ...(entry.expect.titleIncludes
+        ? [{ name: `titleIncludes:${entry.expect.titleIncludes}`, pass: article.metadata?.title?.includes(entry.expect.titleIncludes) === true }]
+        : []),
+      ...(entry.expect.accessStatus
+        ? [{ name: `accessStatus:${entry.expect.accessStatus}`, pass: article.access?.status === entry.expect.accessStatus }]
+        : []),
+      ...(entry.expect.expectedStrategy
+        ? [{ name: `strategy:${entry.expect.expectedStrategy}`, pass: strategy === entry.expect.expectedStrategy }]
+        : []),
+      { name: "provenance", pass: Array.isArray(body.provenance) && body.provenance.length > 0 },
     ];
     return {
       id: entry.id,
@@ -75,10 +114,13 @@ async function fetchCase(entry) {
       ok: response.ok && checks.every((check) => check.pass),
       responseOk: response.ok,
       status: response.status,
-      strategy: body.strategy ?? null,
+      strategy,
       finalUrl: body.finalUrl ?? null,
       markdownChars: markdown.length,
       links: links.length,
+      articleWords: article.wordCount ?? 0,
+      title: article.metadata?.title ?? null,
+      accessStatus: article.access?.status ?? null,
       elapsedMs: Number((performance.now() - started).toFixed(1)),
       checks,
       ...(response.ok ? {} : { error: body.error?.message ?? JSON.stringify(body).slice(0, 500) }),

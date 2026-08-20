@@ -1,8 +1,9 @@
 import { createHmac } from "node:crypto";
 import { fetch as undiciFetch } from "undici";
+import { pinnedAgent, readBoundedResponse } from "../execution/http.js";
 import { egressProxyAgent } from "../execution/shared.js";
 import { OpenBrowseError } from "../errors.js";
-import { assertSafeUrl } from "../security.js";
+import { resolveSafeUrl } from "../security.js";
 import { Storage } from "../storage.js";
 
 export async function dispatchWebhooks(
@@ -21,23 +22,31 @@ export async function dispatchWebhooks(
             webhook.events.includes(event) || webhook.events.includes("*"),
         )
         .map(async (webhook) => {
-          await assertSafeUrl(webhook.url);
+          const checked = await resolveSafeUrl(webhook.url);
+          const directDispatcher = dispatcher
+            ? undefined
+            : pinnedAgent(checked.addresses);
           const payload = JSON.stringify({
             event,
             occurredAt: new Date().toISOString(),
             data,
           });
-          await undiciFetch(webhook.url, {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              "x-openbrowse-event": event,
-              "x-openbrowse-signature": `sha256=${createHmac("sha256", webhook.secret).update(payload).digest("hex")}`,
-            },
-            body: payload,
-            signal: AbortSignal.timeout(5000),
-            ...(dispatcher ? { dispatcher } : {}),
-          });
+          try {
+            await undiciFetch(checked.url, {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "x-openbrowse-event": event,
+                "x-openbrowse-signature": `sha256=${createHmac("sha256", webhook.secret).update(payload).digest("hex")}`,
+              },
+              body: payload,
+              signal: AbortSignal.timeout(5000),
+              redirect: "error",
+              dispatcher: dispatcher ?? directDispatcher,
+            });
+          } finally {
+            await directDispatcher?.close();
+          }
         }),
     );
   } finally {
@@ -84,7 +93,18 @@ export async function searchWeb(
         502,
         true,
       );
-    const body = (await response.json()) as { results?: unknown[] };
+    let body: { results?: unknown[] };
+    try {
+      body = JSON.parse((await readBoundedResponse(response)).toString("utf8")) as {
+        results?: unknown[];
+      };
+    } catch {
+      throw new OpenBrowseError(
+        "TARGET_NETWORK_ERROR",
+        "Search provider returned invalid or oversized JSON",
+        502,
+      );
+    }
     if (!Array.isArray(body.results))
       throw new OpenBrowseError(
         "TARGET_NETWORK_ERROR",

@@ -46,4 +46,24 @@ describe("admission queue", () => {
     expect(estimates.browser).toBe(256);
     expect(estimates.pdf).toBe(256);
   });
+  it("rejects work that would consume the configured reserve instead of stalling", () => {
+    const queue = new AdmissionQueue(undefined, () => ({
+      totalRssMb: config.memoryHardMb - config.memoryReserveMb - 100,
+    }));
+    expect(() => queue.run(async () => "browser", "browser")).toThrow(
+      "cannot admit this workload",
+    );
+    expect(queue.stats().rejections.memory).toBe(1);
+    expect(queue.stats().pending).toBe(0);
+  });
+
+  it("reports admission wait separately from task execution time", async () => {
+    const queue = new AdmissionQueue();
+    const scheduled = await queue.run(
+      () => new Promise<string>((resolve) => setTimeout(() => resolve("done"), 50)),
+      "http",
+    );
+    expect(scheduled.result).toBe("done");
+    expect(scheduled.queueMs).toBeLessThan(30);
+  });
 });

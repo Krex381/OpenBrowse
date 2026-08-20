@@ -34,6 +34,7 @@ export type {
 /** Stable persistence facade; each concern is implemented in its own repository. */
 export class Storage {
   private readonly connection = openStorage();
+  private closed = false;
   private readonly secrets = new SecretBox();
   private readonly cache = new CacheStore(
     this.connection.db,
@@ -62,6 +63,11 @@ export class Storage {
       mkdir(this.connection.profilesDir, { recursive: true }),
     ]);
   }
+  close(): void {
+    if (this.closed) return;
+    this.connection.db.close();
+    this.closed = true;
+  }
   profilePath(id: string): string {
     return this.sessions.profilePath(id);
   }
@@ -75,6 +81,9 @@ export class Storage {
     metadata: Record<string, unknown>,
   ) {
     return this.cache.put(key, body, ttlSeconds, metadata);
+  }
+  deleteCache(key: string) {
+    return this.cache.remove(key);
   }
   purgeCache(value?: string) {
     return this.cache.purge(value);

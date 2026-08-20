@@ -3,6 +3,7 @@ import {
   assertSafeUrl,
   isPrivateIp,
   normalizeUrl,
+  resolveSafeUrl,
 } from "../../src/security.js";
 
 describe("SSRF guard", () => {
@@ -35,5 +36,42 @@ describe("SSRF guard", () => {
     expect(normalizeUrl("HTTPS://Example.COM:443/path#fragment")).toBe(
       "https://example.com/path",
     );
+    expect(
+      normalizeUrl(
+        "https://example.com/path?keep=yes&__cf_chl_rt_tk=ephemeral#fragment",
+      ),
+    ).toBe("https://example.com/path?keep=yes");
+  });
+
+  it("pins every public DNS answer and rejects mixed public/private answers", async () => {
+    let calls = 0;
+    const resolver = async () => {
+      calls++;
+      return [
+        { address: "203.0.113.10", family: 4 as const },
+        { address: "2001:4860:4860::8888", family: 6 as const },
+      ];
+    };
+    const resolved = await resolveSafeUrl(
+      "https://public.example/path",
+      undefined,
+      resolver as never,
+    );
+    expect(calls).toBe(1);
+    expect(resolved.addresses).toEqual([
+      { address: "203.0.113.10", family: 4 },
+      { address: "2001:4860:4860::8888", family: 6 },
+    ]);
+
+    await expect(
+      resolveSafeUrl(
+        "https://rebinding.example",
+        undefined,
+        (async () => [
+          { address: "203.0.113.10", family: 4 },
+          { address: "127.0.0.1", family: 4 },
+        ]) as never,
+      ),
+    ).rejects.toMatchObject({ code: "SSRF_BLOCKED" });
   });
 });

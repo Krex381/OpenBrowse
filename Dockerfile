@@ -28,7 +28,8 @@ RUN npx playwright install --with-deps chromium firefox webkit \
  && rm -rf /var/lib/apt/lists/* \
  && chmod +x /app/deploy/start-with-vnc.sh \
  && useradd --create-home --uid 10001 openbrowse \
- && mkdir -p /data /tmp/openbrowse /ms-playwright \
+ && mkdir -p /data /tmp/openbrowse /tmp/.X11-unix /ms-playwright \
+ && chmod 1777 /tmp/.X11-unix \
  && chown -R openbrowse:openbrowse /app /data /tmp/openbrowse /ms-playwright
 USER 10001
 EXPOSE 3000

@@ -1,7 +1,14 @@
 import { readFile } from "node:fs/promises";
 
 const file = process.argv[2] ?? "benchmark-smoke.json";
-const raw = await readFile(file, "utf8");
+let raw;
+if (file === "-") {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  raw = Buffer.concat(chunks).toString("utf8");
+} else {
+  raw = await readFile(file, "utf8");
+}
 // `npm run … > file` includes npm's human-readable command preamble before
 // the runner's JSON. Keep the verifier usable both through npm and when the
 // benchmark script is invoked directly.
@@ -25,6 +32,13 @@ if (!authorities?.includes("cgroup") && !(report.memory?.peakProcessTreeRssMb > 
   errors.push("fallback admission was selected without process-tree diagnostics");
 if (!(report.memory?.peakAdmissionRssMb > 0))
   errors.push("benchmark did not report peak admission RSS");
+for (const workload of ["http", "browser"])
+  if (!(report.workloads?.[workload]?.p99Ms >= report.workloads?.[workload]?.p95Ms))
+    errors.push(`${workload} workload did not report a valid p99 latency`);
+if (!report.environment?.node || !report.environment?.platform || !report.environment?.playwright)
+  errors.push("benchmark did not report its runtime environment");
+if (!report.workloads?.http?.actualStrategies || !report.workloads?.browser?.actualStrategies)
+  errors.push("benchmark did not report actual execution strategies");
 
 if (errors.length) throw new Error(`${file}: ${errors.join("; ")}`);
 console.log(JSON.stringify({

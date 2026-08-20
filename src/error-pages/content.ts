@@ -41,7 +41,7 @@ const pageCopy: Partial<Record<number, ErrorPageContent>> = {
     eyebrow: "Safety boundary engaged",
     title: "OpenBrowse stopped this request.",
     detail:
-      "A challenge or protected surface was detected. OpenBrowse does not solve CAPTCHAs or bypass bot protection.",
+      "Configured browser backends were attempted, but the protected surface remained. Review backend availability, licensing, and target authorization.",
     actionLabel: "Review safe-use policy",
     actionPath: "/landing#method",
   },

@@ -1,8 +1,10 @@
 import WebSocket, { type RawData } from "ws";
 import { z } from "zod";
 import { config } from "../../../config.js";
+import { assertBoundedJson } from "../../../bounds.js";
 import { OpenBrowseError } from "../../../errors.js";
 import { redactCookies } from "../../../execution.js";
+import { hasAccessChallenge } from "../../../execution/shared.js";
 import { assertSafeUrl, normalizeUrl } from "../../../security.js";
 import { parse, url } from "../../input.js";
 import { agentCommandSchema } from "../../input.js";
@@ -12,6 +14,36 @@ export function registerSessionInteractionRoutes(
   input: SessionRouteDeps,
 ): void {
   const { app, storage, sessions, resolveProxy, requestKeyHash, executeAgentCommand } = input;
+  const challengeState = async (
+    session: NonNullable<ReturnType<typeof storage.getSession>>,
+    ownerKeyHash: string,
+  ) => {
+    const live = await sessions.get(
+      session,
+      await resolveProxy(session.proxyId, ownerKeyHash),
+    );
+    const html = await live.page.content();
+    const cookies = await live.context.cookies(live.page.url()).catch(() => []);
+    const challengeRemaining = hasAccessChallenge(html);
+    return {
+      sessionId: session.id,
+      detected: challengeRemaining,
+      resolved: !challengeRemaining,
+      challengeRemaining,
+      clearanceCookiePresent: cookies.some(
+        (cookie) => cookie.name === "cf_clearance",
+      ),
+      finalUrl: normalizeUrl(live.page.url()),
+      title: await live.page.title().catch(() => ""),
+      screenshotPath: `/v1/sessions/${session.id}/inspect/screenshot`,
+      ...(session.liveViewer
+        ? {
+            viewerPath: `/viewer?sessionId=${session.id}`,
+            vncPath: `/v1/sessions/${session.id}/vnc`,
+          }
+        : {}),
+    };
+  };
   app.post("/v1/sessions/:id/commands", async (request) => {
     const id = parse(z.object({ id: z.string() }), request.params).id;
     const body = parse(
@@ -23,7 +55,10 @@ export function registerSessionInteractionRoutes(
       throw new OpenBrowseError("SESSION_NOT_FOUND", "Session does not exist or has expired", 404);
     if (!executeAgentCommand)
       throw new OpenBrowseError("INTERNAL_ERROR", "Session commands are unavailable", 500);
-    return { results: await Promise.all(body.commands.map((command) => executeAgentCommand(session, command))) };
+    return assertBoundedJson(
+      { results: await Promise.all(body.commands.map((command) => executeAgentCommand(session, command))) },
+      "Session command response",
+    );
   });
   app.post("/v1/sessions/:id/handoff", async (request) => {
     const id = parse(z.object({ id: z.string() }), request.params).id;
@@ -56,6 +91,52 @@ export function registerSessionInteractionRoutes(
       persistent: session.persistent,
       expiresAt: new Date(session.expiresAt).toISOString(),
       transferred: true,
+    };
+  });
+  app.get("/v1/sessions/:id/challenge", async (request) => {
+    const id = parse(z.object({ id: z.string() }), request.params).id;
+    const session = storage.getSession(id);
+    if (!session)
+      throw new OpenBrowseError(
+        "SESSION_NOT_FOUND",
+        "Session does not exist or has expired",
+        404,
+      );
+    return challengeState(session, requestKeyHash(request));
+  });
+  app.post("/v1/sessions/:id/challenge/wait", async (request) => {
+    const id = parse(z.object({ id: z.string() }), request.params).id;
+    const body = parse(
+      z.object({
+        timeoutMs: z.number().int().min(250).max(60000).default(30000),
+        pollIntervalMs: z.number().int().min(250).max(2000).default(500),
+      }),
+      request.body,
+    );
+    const session = storage.getSession(id);
+    if (!session)
+      throw new OpenBrowseError(
+        "SESSION_NOT_FOUND",
+        "Session does not exist or has expired",
+        404,
+      );
+    const startedAt = Date.now();
+    const ownerKeyHash = requestKeyHash(request);
+    let state = await challengeState(session, ownerKeyHash);
+    while (state.challengeRemaining && Date.now() - startedAt < body.timeoutMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(body.pollIntervalMs, body.timeoutMs - (Date.now() - startedAt))),
+      );
+      state = await challengeState(session, ownerKeyHash);
+    }
+    if (state.resolved && session.persistent) {
+      const storageState = await sessions.storageState(session.id);
+      if (storageState) storage.updateSessionState(session.id, storageState);
+    }
+    return {
+      ...state,
+      waitedMs: Date.now() - startedAt,
+      timedOut: state.challengeRemaining,
     };
   });
   app.post("/v1/sessions/:id/navigate", async (request) => {
