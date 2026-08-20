@@ -9,6 +9,7 @@ import {
   searchWeb,
 } from "../../automation.js";
 import { config } from "../../config.js";
+import { assertBoundedJson, jsonBytes } from "../../bounds.js";
 import {
   browserDownload,
   recordVideo,
@@ -17,7 +18,15 @@ import {
 } from "../../execution.js";
 import type { AdmissionQueue } from "../../queue.js";
 import { sendBinary } from "../presentation.js";
-import { fetchInput, parse, url, viewport, type ApiFetch } from "../input.js";
+import {
+  browserBackend,
+  browserBackendOptions,
+  fetchInput,
+  parse,
+  url,
+  viewport,
+  type ApiFetch,
+} from "../input.js";
 import type { StoredProxy, Storage } from "../../storage.js";
 
 type FetchResponse = {
@@ -96,7 +105,7 @@ export function registerExecutionRoutes(input: {
     });
     const html = String(response.html ?? "");
     const $ = (await import("cheerio")).load(html);
-    return {
+    return assertBoundedJson({
       data: body.elements.map((element) => ({
         selector: element.selector,
         results: $(element.selector)
@@ -113,7 +122,7 @@ export function registerExecutionRoutes(input: {
           .get(),
       })),
       strategy: response.strategy,
-    };
+    }, "Scrape response");
   });
   app.post("/map", async (request) => {
     const body = parse(
@@ -124,6 +133,7 @@ export function registerExecutionRoutes(input: {
         include: z.array(z.string().max(256)).max(50).optional(),
         exclude: z.array(z.string().max(256)).max(50).optional(),
         search: z.string().max(256).optional(),
+        render: z.enum(["auto", "http", "browser"]).default("auto"),
       }),
       request.body,
     );
@@ -156,8 +166,10 @@ export function registerExecutionRoutes(input: {
       try {
         storage.updateJob(job.id, job.ownerKeyHash, { status: "running" });
         const urls = await mapSite(pool, body.url, body);
-        const pages = [];
+        const pages: Array<Record<string, unknown>> = [];
+        let truncated = false;
         for (const item of urls) {
+          let page: Record<string, unknown>;
           try {
             const result = await runFetch({
               url: item.url,
@@ -166,23 +178,28 @@ export function registerExecutionRoutes(input: {
               cache: { mode: "default", ttlSeconds: 300 },
               ownerKeyHash: job.ownerKeyHash,
             });
-            pages.push({
+            page = {
               url: item.url,
               status: result.status,
               strategy: result.strategy,
               markdown: result.markdown,
               links: result.links,
-            });
+            };
           } catch (error) {
-            pages.push({
+            page = {
               url: item.url,
               error: error instanceof Error ? error.message : "crawl failed",
-            });
+            };
           }
+          if (jsonBytes({ pages: [...pages, page], truncated: false }) > config.maxResponseBytes) {
+            truncated = true;
+            break;
+          }
+          pages.push(page);
         }
         storage.updateJob(job.id, job.ownerKeyHash, {
           status: "complete",
-          result: JSON.stringify({ pages }),
+          result: JSON.stringify({ pages, truncated }),
         });
         await dispatchWebhooks(storage, job.ownerKeyHash, "job.complete", {
           jobId: job.id,
@@ -222,8 +239,9 @@ export function registerExecutionRoutes(input: {
       body.limit,
     );
     if (!body.scrape) return { results };
-    const enriched = await Promise.all(
-      results.map(async (result) => {
+    const enriched: Array<Record<string, unknown>> = [];
+    for (const result of results) {
+      const item = await (async () => {
         try {
           const fetched = await runFetch({
             url: result.url,
@@ -248,8 +266,10 @@ export function registerExecutionRoutes(input: {
               error instanceof Error ? error.message : "scrape failed",
           };
         }
-      }),
-    );
+      })();
+      assertBoundedJson({ results: [...enriched, item] }, "Search response");
+      enriched.push(item);
+    }
     return { results: enriched };
   });
   app.post("/export", async (request, reply) => {
@@ -378,13 +398,15 @@ export function registerExecutionRoutes(input: {
         ? { screenshot: "Use /screenshot for binary output" }
         : {}),
       policy:
-        "OpenBrowse does not automate CAPTCHA solving, proxy rotation, fingerprint evasion, or bot-protection bypass. CAPTCHA detection fails with 423.",
+        "Detected challenges are retried once per configured browser backend. The response reports backendAttempts and challengeRemaining; no external CAPTCHA-solving service is used.",
     };
   });
   const workflowSchema = z.object({
     url,
     timeoutMs: z.number().int().min(100).max(config.jobTimeoutMs).optional(),
     viewport: viewport.optional(),
+    browserBackend: browserBackend.optional(),
+    browserOptions: browserBackendOptions.optional(),
     proxyId: z.string().optional(),
     steps: z
       .array(
@@ -441,6 +463,12 @@ export function registerExecutionRoutes(input: {
             url: body.url,
             ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
             ...(body.viewport ? { viewport: body.viewport } : {}),
+            ...(body.browserBackend
+              ? { browserBackend: body.browserBackend }
+              : {}),
+            ...(body.browserOptions
+              ? { browserOptions: body.browserOptions }
+              : {}),
             ...(proxy ? { proxy } : {}),
           },
           body.steps,
@@ -500,6 +528,8 @@ export function registerExecutionRoutes(input: {
           .max(config.jobTimeoutMs)
           .optional(),
         viewport: viewport.optional(),
+        browserBackend: browserBackend.optional(),
+        browserOptions: browserBackendOptions.optional(),
         proxyId: z.string().optional(),
         ttlSeconds: z.number().int().min(60).max(86400).default(3600),
       }),
@@ -509,11 +539,15 @@ export function registerExecutionRoutes(input: {
     const recording = await queue
       .run(
         () =>
-          recordVideo({
+          recordVideo(pool, {
           url: body.url,
           durationMs: body.durationMs,
           ...(body.timeoutMs ? { timeoutMs: body.timeoutMs } : {}),
           ...(body.viewport ? { viewport: body.viewport } : {}),
+          ...(body.browserBackend
+            ? { browserBackend: body.browserBackend }
+            : {}),
+          ...(body.browserOptions ? { browserOptions: body.browserOptions } : {}),
           ...(proxy ? { proxy } : {}),
           }),
         "automation",
@@ -530,6 +564,7 @@ export function registerExecutionRoutes(input: {
       contentType: artifact.contentType,
       bytes: artifact.bytes,
       finalUrl: recording.finalUrl,
+      execution: recording.execution,
       downloadPath: `/v1/artifacts/${artifact.id}`,
     };
   });

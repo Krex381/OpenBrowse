@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import { OpenBrowseError } from "../errors.js";
+import { boundedJsonText } from "../bounds.js";
 
 export const mcpTools = [
   {
@@ -73,7 +74,10 @@ export const mcpTools = [
         strategy: { type: "string", enum: ["auto", "http", "browser"] },
         output: {
           type: "array",
-          items: { type: "string", enum: ["html", "markdown", "links"] },
+          items: {
+            type: "string",
+            enum: ["html", "text", "markdown", "links", "metadata", "article", "provenance"],
+          },
         },
         wait: {
           type: "object",
@@ -130,6 +134,11 @@ export const mcpTools = [
         url: { type: "string", format: "uri" },
         maxUrls: { type: "integer", minimum: 1, maximum: 1000 },
         maxDepth: { type: "integer", minimum: 0, maximum: 10 },
+        render: {
+          type: "string",
+          enum: ["auto", "http", "browser"],
+          description: "HTTP-first by default; browser rendering is used only when the SPA heuristic requires it.",
+        },
       },
       required: ["url"],
     },
@@ -167,7 +176,7 @@ export const mcpError = (
   error: { code, message, ...(data === undefined ? {} : { data }) },
 });
 export const mcpText = (value: unknown, isError = false) => ({
-  content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+  content: [{ type: "text", text: boundedJsonText(value, "MCP tool output", 2) }],
   structuredContent: isError ? undefined : value,
   ...(isError ? { isError: true } : {}),
 });

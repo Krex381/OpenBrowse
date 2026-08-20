@@ -1,3 +1,4 @@
+import { assertBoundedJson } from "../../bounds.js";
 import { config } from "../../config.js";
 import { OpenBrowseError } from "../../errors.js";
 import type { SessionManager } from "../../execution.js";
@@ -12,6 +13,8 @@ export function createAgentExecutor(input: {
   resolveProxy(id: string | undefined, ownerKeyHash?: string): Promise<StoredProxy | undefined>;
 }) {
   const { storage, sessions, resolveProxy } = input;
+  const bounded = <T>(value: T): T =>
+    assertBoundedJson(value, "Agent command output");
   const executeAgentCommand = async (
     session: StoredSession,
     command: AgentCommand,
@@ -78,19 +81,19 @@ export function createAgentExecutor(input: {
             404,
             true,
           );
-        return { text: value.trim() };
+        return bounded({ text: value.trim() });
       }
       case "html":
-        return {
+        return bounded({
           html: command.params.selector
             ? await page
                 .locator(command.params.selector)
                 .first()
                 .innerHTML({ timeout: timeoutMs })
             : await page.content(),
-        };
+        });
       case "evaluate":
-        return { value: await page.evaluate(command.params.content) };
+        return bounded({ value: await page.evaluate(command.params.content) });
       case "click":
         await page
           .locator(command.params.selector)

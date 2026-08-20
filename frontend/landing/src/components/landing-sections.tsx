@@ -7,7 +7,7 @@ function Mark({ children }: { children: React.ReactNode }) {
 }
 
 export function ProofBand() {
-  const marks = ["HTTP-first", "Tenant-bound", "Self-hosted", "Auditable", "No stealth"];
+  const marks = ["HTTP-first", "Tenant-bound", "Self-hosted", "Auditable", "Backend-selectable"];
   return <div className="proof-band" aria-label="OpenBrowse operating principles">{marks.map((mark) => <span key={mark}><Mark>×</Mark>{mark}</span>)}</div>;
 }
 
@@ -18,7 +18,7 @@ export function MethodSection() {
       <div className="method-grid">
         <article className="method-card card-http"><span className="card-number">A</span><Network aria-hidden="true" size={28} strokeWidth={1.6} /><h3>Ask the web first.</h3><p>Fetch public pages directly for fast content, extraction, mapping, and exports.</p><ul><li>redirect re-validation</li><li>response size limits</li><li>cached where safe</li></ul></article>
         <article className="method-card card-browser"><span className="card-number">B</span><Radar aria-hidden="true" size={28} strokeWidth={1.6} /><h3>Escalate with intent.</h3><p>Bring up Chromium only for scripts, rendering, screenshots, PDFs, and downloads.</p><ul><li>warm bounded pool</li><li>queue admission</li><li>browser recycling</li></ul></article>
-        <article className="method-card card-policy"><span className="card-number">C</span><ShieldCheck aria-hidden="true" size={28} strokeWidth={1.6} /><h3>Keep the boundary sharp.</h3><p>Never route private networks, upload arbitrary code, or solve a challenge for someone.</p><ul><li>SSRF control</li><li>API-key scopes</li><li>safe failures</li></ul></article>
+        <article className="method-card card-policy"><span className="card-number">C</span><ShieldCheck aria-hidden="true" size={28} strokeWidth={1.6} /><h3>Keep the boundary sharp.</h3><p>Never route private networks or upload arbitrary code. Challenge retries stay explicit and bounded.</p><ul><li>SSRF control</li><li>API-key scopes</li><li>honest outcomes</li></ul></article>
       </div>
     </section>
   );

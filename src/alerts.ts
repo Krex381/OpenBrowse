@@ -1,7 +1,8 @@
 import { fetch as undiciFetch } from "undici";
 import { config } from "./config.js";
+import { pinnedAgent } from "./execution/http.js";
 import { egressProxyAgent } from "./execution/shared.js";
-import { assertSafeUrl } from "./security.js";
+import { resolveSafeUrl } from "./security.js";
 
 export type OperationalAlert =
   | "queue"
@@ -29,9 +30,11 @@ export async function notifyOperationalAlert(
   if (!endpoint || now - (lastSent.get(event) ?? 0) < 60000) return;
   lastSent.set(event, now);
   const dispatcher = egressProxyAgent();
+  let directDispatcher: ReturnType<typeof pinnedAgent> | undefined;
   try {
-    const checked = await assertSafeUrl(endpoint);
-    const target = new URL(checked);
+    const checked = await resolveSafeUrl(endpoint);
+    const target = checked.url;
+    directDispatcher = dispatcher ? undefined : pinnedAgent(checked.addresses);
     target.searchParams.set("event", event);
     for (const [key, value] of Object.entries(details))
       if (value !== undefined)
@@ -40,11 +43,12 @@ export async function notifyOperationalAlert(
       method: "GET",
       signal: AbortSignal.timeout(5000),
       redirect: "error",
-      ...(dispatcher ? { dispatcher } : {}),
+      dispatcher: dispatcher ?? directDispatcher,
     });
   } catch {
     // Alerts must never block or fail browser work; operator telemetry is best effort.
   } finally {
     await dispatcher?.close();
+    await directDispatcher?.close();
   }
 }

@@ -16,6 +16,11 @@ import { OpenBrowseError } from "../errors.js";
 import { assertSafeUrl } from "../security.js";
 import type { StoredProxy, StoredSession } from "../storage.js";
 import { defaultProxySettings, proxySettings } from "./shared.js";
+import { launchBrowserWorker } from "./browser-launchers.js";
+import type {
+  BrowserBackendId,
+  BrowserBackendOptions,
+} from "./types.js";
 
 export interface LiveSession {
   session: StoredSession;
@@ -23,6 +28,7 @@ export interface LiveSession {
   browser: Browser;
   context: BrowserContext;
   page: Page;
+  backend: BrowserBackendId;
 }
 
 export class SessionManager {
@@ -33,6 +39,8 @@ export class SessionManager {
     session: StoredSession,
     proxy?: StoredProxy,
     launchOptions: SafeLaunchOptions = {},
+    backend: BrowserBackendId = config.defaultBrowserBackend,
+    backendOptions?: BrowserBackendOptions,
   ): Promise<LiveSession> {
     await this.closeExpired();
     if (session.liveViewer && [...this.active.values()].some((live) => live.session.liveViewer))
@@ -55,11 +63,24 @@ export class SessionManager {
       ...(launchProxy ? { proxy: launchProxy } : {}),
       args: [...chromiumExtensionArgs, ...(launchOptions.args ?? [])],
     };
-    const server = await chromium.launchServer(launch);
-    const browser = await chromium.connect(server.wsEndpoint());
+    let server: BrowserServer;
+    let browser: Browser;
+    if (backend === "playwright-chromium") {
+      server = await chromium.launchServer(launch);
+      browser = await chromium.connect(server.wsEndpoint());
+    } else {
+      const launched = await launchBrowserWorker(backend, backendOptions, {
+        headless: launch.headless,
+      });
+      server = launched.server;
+      browser = launched.browser;
+    }
     const context = await browser.newContext({
       viewport: session.viewport,
       serviceWorkers: "block",
+      ...(backend === "playwright-chromium" || !launchProxy
+        ? {}
+        : { proxy: launchProxy }),
       ...(session.storageState
         ? {
             storageState: JSON.parse(session.storageState) as {
@@ -81,7 +102,7 @@ export class SessionManager {
       }
     });
     const page = await context.newPage();
-    const live = { session, server, browser, context, page };
+    const live = { session, server, browser, context, page, backend };
     this.active.set(session.id, live);
     const expiresInMs = Math.max(0, session.expiresAt - Date.now());
     const expiryTimer = setTimeout(() => void this.close(session.id), expiresInMs);
@@ -93,8 +114,11 @@ export class SessionManager {
     session: StoredSession,
     proxy?: StoredProxy,
     launch?: SafeLaunchOptions,
+    backend?: BrowserBackendId,
+    backendOptions?: BrowserBackendOptions,
   ): Promise<LiveSession> {
-    return this.active.get(session.id) ?? this.create(session, proxy, launch);
+    return this.active.get(session.id) ??
+      this.create(session, proxy, launch, backend, backendOptions);
   }
   async startTrace(session: StoredSession, proxy?: StoredProxy): Promise<void> {
     const live = await this.get(session, proxy);

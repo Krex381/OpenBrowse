@@ -14,9 +14,24 @@ export type FetchResponse = {
   attempted: string[];
   contentType: string;
   html?: string;
+  text?: string;
   markdown?: string;
   links?: string[];
-  timings: { queueMs: number; fetchMs: number; totalMs: number };
+  metadata?: import("../execution.js").ArticleMetadata;
+  article?: import("../execution.js").ArticleResult;
+  provenance?: import("../execution.js").ProvenanceRecord[];
+  timings: {
+    queueMs: number;
+    fetchMs: number;
+    httpMs: number;
+    browserAcquireMs: number;
+    navigationMs: number;
+    settleMs: number;
+    extractionMs: number;
+    browserMs: number;
+    totalMs: number;
+  };
+  execution: import("../execution.js").FetchResult["execution"];
   cache: { hit: boolean; key: string; layer?: string };
   resourceUsage: {
     strategy: string;

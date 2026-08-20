@@ -2,9 +2,11 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { config } from "../../../config.js";
 import { OpenBrowseError } from "../../../errors.js";
-import type { SessionManager } from "../../../execution.js";
+import { planPersistentSession, type SessionManager } from "../../../execution.js";
+import { hasAccessChallenge } from "../../../execution/shared.js";
+import { assertSafeUrl, normalizeUrl } from "../../../security.js";
 import type { StoredProxy, StoredSession, Storage } from "../../../storage.js";
-import { parse, viewport } from "../../input.js";
+import { parse, url, viewport } from "../../input.js";
 import type { AgentCommand } from "../../input.js";
 import { sessionConnectUrl } from "../../presentation.js";
 
@@ -51,11 +53,17 @@ export function registerSessionLifecycleRoutes(input: SessionRouteDeps): void {
         profileName: z.string().trim().min(1).max(100).optional(),
         recordTrace: z.boolean().default(false),
         liveViewer: z.boolean().default(false),
+        startUrl: url.optional(),
+        waitUntil: z
+          .enum(["load", "domcontentloaded", "networkidle"])
+          .default("domcontentloaded"),
       }),
       request.body,
     );
     const ownerKeyHash = requestKeyHash(request);
-    await resolveProxy(body.proxyId, ownerKeyHash);
+    const proxy = await resolveProxy(body.proxyId, ownerKeyHash);
+    if (body.startUrl)
+      await assertSafeUrl(body.startUrl, proxy?.allowedDomains);
     if (body.liveViewer && !config.vncBridgeUrl)
       throw new OpenBrowseError(
         "FEATURE_DISABLED",
@@ -92,14 +100,58 @@ export function registerSessionLifecycleRoutes(input: SessionRouteDeps): void {
       ...(profile ? { storageState: profile.storageState } : {}),
       ...(body.liveViewer ? { liveViewer: true } : {}),
     });
-    if (body.recordTrace)
-      await sessions.startTrace(session, await resolveProxy(session.proxyId, ownerKeyHash));
+    let navigation:
+      | {
+          status: number;
+          finalUrl: string;
+          challengeDetected: boolean;
+        }
+      | undefined;
+    try {
+      if (body.recordTrace) await sessions.startTrace(session, proxy);
+      if (body.startUrl) {
+        const live = await sessions.get(session, proxy);
+        const response = await live.page.goto(body.startUrl, {
+          waitUntil: body.waitUntil,
+          timeout: config.jobTimeoutMs,
+        });
+        navigation = {
+          status: response?.status() ?? 200,
+          finalUrl: normalizeUrl(live.page.url()),
+          challengeDetected: hasAccessChallenge(await live.page.content()),
+        };
+        if (session.persistent) {
+          const state = await sessions.storageState(session.id);
+          if (state) storage.updateSessionState(session.id, state);
+        }
+      }
+    } catch (error) {
+      await sessions.close(session.id);
+      await storage.deleteSession(session.id);
+      throw error;
+    }
     return {
       id: session.id,
       expiresAt: new Date(session.expiresAt).toISOString(),
       connectUrl: sessionConnectUrl(request, session.id),
       persistent: session.persistent,
       recording: body.recordTrace,
+      executionPlan: planPersistentSession({
+        persistent: body.persistent,
+        profile: Boolean(profile),
+        liveViewer: body.liveViewer,
+      }),
+      ...(navigation
+        ? {
+            navigation,
+            challenge: {
+              detected: navigation.challengeDetected,
+              statusPath: `/v1/sessions/${session.id}/challenge`,
+              waitPath: `/v1/sessions/${session.id}/challenge/wait`,
+              operatorControl: body.liveViewer ? "vnc" : "commands",
+            },
+          }
+        : {}),
       ...(body.liveViewer ? { viewerPath: `/viewer?sessionId=${session.id}` } : {}),
     };
   });

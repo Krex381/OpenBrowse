@@ -130,13 +130,120 @@ describe("HTTP-first execution", () => {
       payload: {
         url: "https://example.com",
         strategy: "http",
-        output: ["html", "links"],
+        output: ["html", "text", "markdown", "links", "metadata", "article", "provenance"],
       },
     });
     expect(response.statusCode).toBe(200);
     expect(response.json().strategy).toBe("http");
     expect(response.json().html).toContain("Example Domain");
+    expect(response.json().text).toContain("Example Domain");
+    expect(response.json().article.provenance.strategy).toBe("http");
+    expect(response.json().article.access.status).toBe("open");
+    expect(response.json().provenance.length).toBeGreaterThan(0);
+    expect(response.json().execution.plan).toMatchObject({
+      strategy: "HTTP",
+      requestedStrategy: "http",
+      stages: ["http"],
+      reason: "explicit-http",
+      attemptBudget: 1,
+      estimatedCost: { units: 1, basis: "http" },
+      cacheEligibility: { eligible: true, reason: "public-request" },
+    });
+    expect(response.json().execution.backendAttempts).toEqual([]);
+    expect(response.json().execution).toMatchObject({
+      strategyRequested: "http",
+      strategyUsed: "http",
+      escalated: false,
+    });
+    expect(response.json().execution.timeline.map((entry: { event: string }) => entry.event)).toEqual([
+      "accepted",
+      "http-started",
+      "http-completed",
+      "content-analyzed",
+      "extraction-complete",
+    ]);
+    expect(response.json().timings).toMatchObject({
+      browserAcquireMs: 0,
+      navigationMs: 0,
+      settleMs: 0,
+      browserMs: 0,
+    });
   }, 30000);
+
+  it("publishes the stock, Patchright, and operator-gated CloakBrowser backends", async () => {
+    const response = await services.app.inject({
+      method: "GET",
+      url: "/v1/capabilities",
+      headers: { authorization: "Bearer dev-key" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().execution).toMatchObject({
+      planner: "deterministic-http-first-v1",
+      defaultBackend: "playwright-chromium",
+    });
+    expect(response.json().execution.browserBackends).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "playwright-chromium",
+          enabled: true,
+          stealthPatched: false,
+        }),
+        expect.objectContaining({
+          id: "patchright-chromium",
+          enabled: true,
+          stealthPatched: true,
+        }),
+        expect.objectContaining({
+          id: "cloakbrowser-chromium",
+          enabled: false,
+          operatorLicenseRequired: true,
+          acceptsFingerprintOptions: true,
+          acceptsHumanizationOptions: true,
+        }),
+      ]),
+    );
+    expect(response.json().policies.stealth).toContain("operator-selected");
+  });
+
+  it("renders through the maintained Patchright backend", async () => {
+    const response = await services.app.inject({
+      method: "POST",
+      url: "/v1/fetch",
+      headers: { authorization: "Bearer dev-key" },
+      payload: {
+        url: "https://example.com",
+        strategy: "browser",
+        browserBackend: "patchright-chromium",
+        output: ["text", "provenance"],
+        cache: { mode: "no-store", ttlSeconds: 300 },
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().text).toContain("Example Domain");
+    expect(response.json().execution).toMatchObject({
+      backendAttempts: ["patchright-chromium"],
+      selectedBackend: "patchright-chromium",
+      backendDecisionReason: "requested-supported-backend",
+    });
+  }, 30_000);
+
+  it("rejects dangerous non-fingerprint Chromium flags", async () => {
+    const response = await services.app.inject({
+      method: "POST",
+      url: "/v1/fetch",
+      headers: { authorization: "Bearer dev-key" },
+      payload: {
+        url: "https://example.com",
+        strategy: "browser",
+        browserBackend: "cloakbrowser-chromium",
+        browserOptions: {
+          fingerprintArgs: ["--no-sandbox"],
+          humanize: true,
+        },
+      },
+    });
+    expect(response.statusCode).toBe(400);
+  });
   it("serves a cache hit on a repeat request", async () => {
     const request = {
       method: "POST" as const,

@@ -17,7 +17,7 @@ spec:
           localhostProfile: openbrowse-playwright.json
       containers:
         - name: openbrowse
-          image: ghcr.io/openbrowse/openbrowse:0.1.0
+          image: ghcr.io/openbrowse/openbrowse:0.2.0
           imagePullPolicy: IfNotPresent
           ports: [{ containerPort: 3000 }]
           env:

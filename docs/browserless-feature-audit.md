@@ -11,11 +11,13 @@ native `/v1` API and OpenAPI document are the primary interface.
 | Typed browser workflows | Available | Bounded wait, click, fill, press, and extract steps; no caller-supplied JavaScript. |
 | Sessions and profiles | Available | API-key-owned sessions, encrypted persistent state, profiles, traces, artifacts, and recordings. |
 | BrowserQL and MCP | Available | Authenticated BrowserQL and Streamable HTTP MCP endpoints. |
-| VNC viewer | Available in Docker | Session-scoped noVNC bridge for sessions created with `liveViewer: true`. |
+| VNC viewer and human challenge handoff | Available in Docker | Session-scoped noVNC bridge, atomic `startUrl`, challenge status polling, and bounded resume preserve the exact BrowserContext. Alternative operator-default backends can run headed in Xvfb. |
 | CDP and Playwright bridges | Operator opt-in | Disabled by default. Enable only behind a dedicated egress boundary. |
 | Lighthouse | Operator opt-in | The bounded performance report is always available; full Lighthouse requires an isolated worker. |
 | Proxy support | Available | Encrypted user-managed HTTP(S) proxies and domain allowlists. |
-| CAPTCHA solving, stealth, bypass | Not provided | Challenges fail with `423 CAPTCHA_DETECTED`. |
+| Challenge-aware browser fallback | Available | A detected challenge can retry once through enabled Patchright, Clearcote, Camoufox, and CloakBrowser backends. Results expose the attempted backends and whether the challenge remains. |
+| Raw fingerprint and humanization controls | Operator backends | Bounded `--fingerprint*` arguments apply to CloakBrowser/Clearcote; typed Camoufox options and Cloak humanization remain operator-controlled. |
+| External CAPTCHA solving | Not provided | OpenBrowse does not submit challenges to a solving service or claim success when a challenge remains. Authorized operators can complete a challenge through the authenticated live session. |
 | Managed cloud operations | Not provided | Billing, regions, managed proxy networks, and commercial support are operator concerns. |
 
 ## Authentication

@@ -6,6 +6,7 @@ import { normalizeUrl } from "../../security.js";
 import type { StoredProxy, StoredSession } from "../../storage.js";
 import { agentCommandSchema, parse, url, type AgentCommand } from "../input.js";
 import { type BqlField } from "../browserql.js";
+import { hasAccessChallenge } from "../../execution/shared.js";
 
 export function createBqlExecutor(input: {
   sessions: SessionManager;
@@ -556,12 +557,19 @@ export function createBqlExecutor(input: {
           })),
         );
       }
-      case "solve":
-        throw new OpenBrowseError(
-          "FEATURE_DISABLED",
-          "OpenBrowse does not provide CAPTCHA solving or bot-protection bypass",
-          403,
+      case "solve": {
+        const live = await sessions.get(
+          session,
+          await resolveProxy(session.proxyId, session.ownerKeyHash),
         );
+        const found = hasAccessChallenge(await live.page.content());
+        return {
+          found,
+          solved: !found,
+          backend: live.backend,
+          retryRecommended: found,
+        };
+      }
       default:
         throw new OpenBrowseError(
           "UNSUPPORTED_OPERATION",

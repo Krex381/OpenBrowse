@@ -1,8 +1,10 @@
 import { config } from "../config.js";
+import { assertBoundedJson } from "../bounds.js";
 import { OpenBrowseError } from "../errors.js";
 import { assertSafeUrl, normalizeUrl } from "../security.js";
 import { BrowserPool } from "./pool.js";
-import { timeout } from "./shared.js";
+import { hasAccessChallenge, timeout } from "./shared.js";
+import { runChallengeFallback } from "./challenge-fallback.js";
 import type { FetchInput } from "./types.js";
 
 export type WorkflowStep =
@@ -27,63 +29,101 @@ export async function runWorkflow(
   finalUrl: string;
   title: string;
   outputs: Record<string, unknown>;
+  execution: {
+    backendAttempts: string[];
+    selectedBackend: string;
+    challengeRemaining: boolean;
+  };
 }> {
   await assertSafeUrl(input.url, input.proxy?.allowedDomains);
-  return pool
-    .withContext(input.viewport, input.proxy, async (_context, page) => {
-      page.setDefaultNavigationTimeout(timeout(input.timeoutMs));
-      await page.goto(input.url, {
-        waitUntil: input.waitUntil ?? "domcontentloaded",
-        timeout: timeout(input.timeoutMs),
-      });
-      const outputs: Record<string, unknown> = {};
-      for (const step of steps) {
-        const locator = page.locator(step.selector);
-        if (step.action === "wait")
-          await locator.waitFor({
-            state: "visible",
+  return runChallengeFallback(
+    pool,
+    input,
+    input.browserBackend ?? config.defaultBrowserBackend,
+    async (backend, backendOptions) => {
+      const value = await pool.withContext(
+        input.viewport,
+        input.proxy,
+        async (_context, page) => {
+          page.setDefaultNavigationTimeout(timeout(input.timeoutMs));
+          await page.goto(input.url, {
+            waitUntil: input.waitUntil ?? "domcontentloaded",
             timeout: timeout(input.timeoutMs),
           });
-        else if (step.action === "click")
-          await locator
-            .nth(step.index ?? 0)
-            .click({ timeout: timeout(input.timeoutMs) });
-        else if (step.action === "fill")
-          await locator.fill(step.value, { timeout: timeout(input.timeoutMs) });
-        else if (step.action === "press")
-          await locator.press(step.key, { timeout: timeout(input.timeoutMs) });
-        else {
-          const values = await locator.evaluateAll(
-            (nodes, rule) =>
-              nodes.map((node) => {
-                const element = node as unknown as {
-                  innerHTML: string;
-                  getAttribute(name: string): string | null;
-                  textContent: string | null;
-                };
-                if (rule.type === "html") return element.innerHTML;
-                if (rule.type === "attribute")
-                  return element.getAttribute(rule.attribute ?? "");
-                return element.textContent?.trim() ?? "";
-              }),
-            step,
-          );
-          outputs[step.name] = step.all ? values : (values[0] ?? null);
-        }
-      }
-      const html = await page.content();
-      if (/captcha|recaptcha|hcaptcha|cf-chl-/i.test(html))
-        throw new OpenBrowseError(
-          "CAPTCHA_DETECTED",
-          "A challenge was detected and the configured policy is fail",
-          423,
-        );
-      return {
-        finalUrl: normalizeUrl(page.url()),
-        title: await page.title(),
-        outputs,
-      };
-    })
+          const outputs: Record<string, unknown> = {};
+          let stepError: unknown;
+          try {
+            for (const step of steps) {
+              const locator = page.locator(step.selector);
+              if (step.action === "wait")
+                await locator.waitFor({
+                  state: "visible",
+                  timeout: timeout(input.timeoutMs),
+                });
+              else if (step.action === "click")
+                await locator
+                  .nth(step.index ?? 0)
+                  .click({ timeout: timeout(input.timeoutMs) });
+              else if (step.action === "fill")
+                await locator.fill(step.value, {
+                  timeout: timeout(input.timeoutMs),
+                });
+              else if (step.action === "press")
+                await locator.press(step.key, {
+                  timeout: timeout(input.timeoutMs),
+                });
+              else {
+                const values = await locator.evaluateAll(
+                  (nodes, rule) =>
+                    nodes.map((node) => {
+                      const element = node as unknown as {
+                        innerHTML: string;
+                        getAttribute(name: string): string | null;
+                        textContent: string | null;
+                      };
+                      if (rule.type === "html") return element.innerHTML;
+                      if (rule.type === "attribute")
+                        return element.getAttribute(rule.attribute ?? "");
+                      return element.textContent?.trim() ?? "";
+                    }),
+                  step,
+                );
+                outputs[step.name] = step.all ? values : (values[0] ?? null);
+              }
+            }
+          } catch (error) {
+            stepError = error;
+          }
+          const challengeDetected = hasAccessChallenge(await page.content());
+          if (stepError && !challengeDetected) throw stepError;
+          return {
+            finalUrl: normalizeUrl(page.url()),
+            title: await page.title(),
+            outputs,
+            challengeDetected,
+          };
+        },
+        backend,
+        backendOptions,
+      );
+      return { value, challengeDetected: value.challengeDetected };
+    },
+  )
+    .then((fallback) =>
+      assertBoundedJson(
+        {
+          finalUrl: fallback.value.finalUrl,
+          title: fallback.value.title,
+          outputs: fallback.value.outputs,
+          execution: {
+            backendAttempts: fallback.backendAttempts,
+            selectedBackend: fallback.selectedBackend,
+            challengeRemaining: fallback.challengeRemaining,
+          },
+        },
+        "Workflow output",
+      ),
+    )
     .catch((error: unknown) => {
       if (error instanceof OpenBrowseError) throw error;
       if (error instanceof Error && /Timeout/i.test(error.message))

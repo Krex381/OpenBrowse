@@ -10,7 +10,7 @@
 
 <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-0f172a?style=flat-square">
 <img alt="Node.js 24 or newer" src="https://img.shields.io/badge/node-%3E%3D%2024-0f172a?style=flat-square&logo=node.js&logoColor=white">
-<img alt="Docker verified" src="https://img.shields.io/badge/Docker-verified-166534?style=flat-square&logo=docker&logoColor=white">
+<img alt="Docker supported" src="https://img.shields.io/badge/Docker-supported-166534?style=flat-square&logo=docker&logoColor=white">
 <img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-0f172a?style=flat-square">
 
 </div>
@@ -83,7 +83,7 @@ curl -X POST http://localhost:3000/v1/fetch \
   -d '{
     "url": "https://example.com",
     "strategy": "auto",
-    "output": ["html", "markdown", "links"]
+    "output": ["text", "markdown", "metadata", "article", "links"]
   }'
 ```
 
@@ -109,6 +109,62 @@ When you know a page's readiness signal, override it with a typed wait:
 }
 ```
 
+Choose a backend explicitly when the workload needs it. Patchright is enabled
+by default and uses the same pinned Chromium installation as Playwright.
+CloakBrowser, Camoufox, and Clearcote are operator-enabled because they require
+a separately licensed or provisioned browser artifact. Raw Chromium options
+are deliberately limited to `--fingerprint...` arguments; sandbox,
+remote-debugging, and proxy switches cannot be injected through this field.
+
+```json
+{
+  "url": "https://example.com",
+  "strategy": "browser",
+  "browserBackend": "cloakbrowser-chromium",
+  "browserOptions": {
+    "fingerprintArgs": [
+      "--fingerprint=381204",
+      "--fingerprint-platform=windows"
+    ],
+    "humanize": true,
+    "humanPreset": "careful",
+    "humanConfig": {
+      "typing_delay": 90,
+      "mouse_overshoot_chance": 0.1
+    }
+  },
+  "output": ["text", "provenance"]
+}
+```
+
+If a rendered page still contains a recognized challenge, OpenBrowse attempts
+each enabled, operation-compatible backend at most once: the requested/default
+backend, Patchright, Clearcote, Camoufox, then CloakBrowser. The result reports
+whether the challenge remained. BrowserQL `solve` uses the same bounded backend
+escalation; it does not call an external CAPTCHA-solving service.
+
+For an authorized flow that needs a person, create a headed session and
+navigate atomically. OpenBrowse keeps that exact BrowserContext alive while the
+operator uses the authenticated viewer, then a bounded wait resumes only after
+the challenge document is gone:
+
+```bash
+curl -sS http://localhost:3000/v1/sessions \
+  -H "Authorization: Bearer $OPENBROWSE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"ttlSeconds":900,"liveViewer":true,"startUrl":"https://example.com"}'
+
+curl -sS -X POST http://localhost:3000/v1/sessions/SESSION_ID/challenge/wait \
+  -H "Authorization: Bearer $OPENBROWSE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"timeoutMs":60000,"pollIntervalMs":500}'
+```
+
+The status response exposes only whether `cf_clearance` exists; cookie values
+remain inside the encrypted, API-key-owned session. For properties you control,
+use Cloudflare's official dummy keys in automated tests and pre-clearance in
+production instead of challenging CI browsers.
+
 Supported wait types are `domcontentloaded`, `load`, `networkidle`, `selector`,
 `delay`, and `stability`. The legacy `waitUntil` field remains supported but
 cannot be combined with `wait`.
@@ -116,6 +172,30 @@ cannot be combined with `wait`.
 `auto` uses HTTP first and escalates to Chromium only when the response looks
 client-rendered. The OpenAPI document is available at `/openapi.json`; the
 local product UI is at `/landing`.
+
+Every fetch explains what happened. `execution.plan` contains the deterministic
+stage order, decision reason, attempt budget, cache eligibility, and estimated
+memory class. `execution.backendAttempts` and `timings` distinguish HTTP,
+browser acquisition, navigation, settle, and extraction time. Article output
+adds normalized metadata, readable text, word count, access signals, and source
+provenance without pretending that restricted text was retrieved.
+
+```json
+{
+  "strategy": "browser",
+  "attempted": ["http", "browser"],
+  "execution": {
+    "plan": {
+      "stages": ["http", "browser"],
+      "reason": "client-rendered-shell",
+      "attemptBudget": 2,
+      "browserBackend": "playwright-chromium"
+    },
+    "backendAttempts": ["playwright-chromium"],
+    "selectedBackend": "playwright-chromium"
+  }
+}
+```
 
 ## Core API and optional interfaces
 
@@ -130,10 +210,15 @@ Read [Browserless compatibility](docs/browserless-feature-audit.md) for the
 supported migration surface and [architecture](docs/architecture.md) for the
 request, storage, and isolation model.
 
+`/map` uses the same HTTP-first planner. If an HTTP response is only an SPA
+shell, OpenBrowse renders it and discovers same-origin `href` and `data-href`
+routes from the settled DOM. It does not click unknown controls or submit forms.
+
 ## Boundaries that stay in place
 
 - Private, loopback, link-local, metadata, multicast, and DNS-resolved
-  internal targets are rejected before navigation and after redirects.
+  internal targets are rejected before navigation and after redirects. Direct
+  HTTP connections pin the validated DNS answer for that hop.
 - Docker runs Chromium as a non-root user with the sandbox enabled, a read-only
   root filesystem, dropped capabilities, resource limits, and the bundled
   seccomp profile.
@@ -143,8 +228,10 @@ request, storage, and isolation model.
 - Raw CDP/Playwright bridges, full Lighthouse, and cache purge are off by
   default. Turn them on only in an isolated worker deployment with explicit
   egress controls.
-- CAPTCHA challenges return `423 CAPTCHA_DETECTED`. There is no solver,
-  stealth mode, fingerprint randomization, or protection bypass.
+- Challenge handling is bounded to configured browser backends. There is no
+  external solver or unbounded retry loop. Backend fingerprint and
+  humanization controls are explicit request fields and never change sandbox,
+  authentication, SSRF, timeout, or output limits.
 
 Application checks are defense in depth. A production deployment still needs a
 DNS-aware egress proxy or firewall that blocks private and metadata ranges at
@@ -182,8 +269,9 @@ requests.
 ## Benchmark and soak validation
 
 Use measured data from your own deployment; OpenBrowse does not publish
-synthetic capacity claims. The soak runner mixes four HTTP-first requests with
-one forced browser render, reports p50/p95 latency, failures, worker state,
+synthetic capacity claims. The soak runner mixes four forced-HTTP requests with
+one forced browser render, reports requested and actual execution strategies,
+backend use, p50/p95/p99 latency, failures, worker state,
 and Node, Chromium-tree, and cgroup memory snapshots. Long-running mode also
 records periodic snapshots, so RSS growth is visible instead of inferred from
 only the start and end of a test. In a Linux container, admission uses the
@@ -193,6 +281,8 @@ alongside it, including peak divergence and recycling transitions.
 ```bash
 export OPENBROWSE_BENCHMARK_API_KEY="$OPENBROWSE_API_KEY"
 export OPENBROWSE_BENCHMARK_TARGET='https://example.com'
+# Or cycle through a reviewed fixture set:
+# export OPENBROWSE_BENCHMARK_TARGETS='https://static.example,https://spa.example,https://news.example/article'
 export OPENBROWSE_BENCHMARK_REQUESTS=1000
 export OPENBROWSE_BENCHMARK_CONCURRENCY=4
 npm run benchmark:soak > benchmark.json
@@ -201,7 +291,7 @@ npm run benchmark:soak > benchmark.json
 For reliability evidence, run the same command with a controlled target for
 one hour, six hours, and twenty-four hours. Keep the JSON output with the
 deployment configuration and inspect `failures`, `memory.samples`, and the
-p95 values before calling a capacity figure production-ready.
+p95/p99 values before calling a capacity figure production-ready.
 
 ```bash
 for hours in 1 6 24; do
@@ -220,6 +310,24 @@ For extraction quality, use the assertion-backed 100–500 page
 [corpus protocol](docs/benchmarks/README.md#extraction-corpus-fidelity). It
 tests the deployed `auto` path across real authorised pages and reports every
 failed content assertion instead of inferring fidelity from request success.
+Assertions cover Markdown, links, article word count/title/access state,
+selected strategy, and provenance.
+
+## Browser backend policy
+
+OpenBrowse ships five typed browser adapters. Stock Playwright remains the
+default. Patchright is the maintained Node-native replacement for
+`invisible_playwright` and is enabled by default. CloakBrowser and Camoufox are
+optional package integrations; Clearcote is an executable-path adapter. These
+three remain disabled until the operator provisions the browser, reviews its
+terms, and adds it to `OPENBROWSE_BROWSER_BACKENDS`.
+
+Workers are isolated by backend and backend-specific fingerprint/humanization
+profile. OpenBrowse never chooses a backend from a hostname, and it never
+forwards raw license keys, proxy credentials, or unrestricted Chromium
+arguments from an API caller. See
+[backend decisions](docs/browser-backends.md) for installation, licensing, and
+runtime details.
 
 ## License and notices
 

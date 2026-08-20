@@ -7,6 +7,7 @@ import { config, type ApiKeyPolicy } from "../../config.js";
 import { errorPageCsp, renderErrorPage } from "../../error-pages.js";
 import { OpenBrowseError } from "../../errors.js";
 import type { BrowserPool } from "../../execution.js";
+import { executionMetrics } from "../../telemetry.js";
 import type { AdmissionQueue } from "../../queue.js";
 import type { Storage } from "../../storage.js";
 
@@ -122,6 +123,7 @@ export function registerPublicRoutes(input: {
     return reply.code(ready ? 200 : 503).send({
       ready,
       browserWorkers: pool.stats(),
+      workerDetails: pool.workerSnapshots(),
     });
   });
   app.get("/metrics", async (_request, reply) => {
@@ -131,7 +133,7 @@ export function registerPublicRoutes(input: {
     const memory = pool.memorySnapshot();
     reply.type("text/plain; version=0.0.4");
     const authority = memory.admissionAuthority === "cgroup" ? 1 : memory.admissionAuthority === "process-tree" ? 2 : 3;
-    return `openbrowse_queue_depth ${stats.pending}\nopenbrowse_active_jobs ${stats.active}\nopenbrowse_memory_pressure ${stats.pressure === "normal" ? 0 : stats.pressure === "pressure" ? 1 : 2}\nopenbrowse_node_rss_megabytes ${memory.nodeRssMb.toFixed(1)}\nopenbrowse_browser_tree_rss_megabytes ${memory.browserRssMb.toFixed(1)}\nopenbrowse_process_tree_rss_megabytes ${memory.processTreeRssMb.toFixed(1)}\nopenbrowse_admission_rss_megabytes ${memory.totalRssMb.toFixed(1)}\nopenbrowse_memory_admission_authority ${authority}\nopenbrowse_browser_processes ${browser.processes}\nopenbrowse_browser_contexts ${browser.busy}\nopenbrowse_browser_workers_healthy ${browser.healthy}\nopenbrowse_browser_workers_draining ${browser.draining}\nopenbrowse_browser_workers_starting ${browser.starting}\nopenbrowse_browser_worker_launches_total ${browser.launches}\nopenbrowse_browser_worker_crashes_total ${browser.crashes}\nopenbrowse_browser_worker_recycles_total ${browser.recycled}\nopenbrowse_browser_worker_replacements_total ${browser.replacements}\n`;
+    return `openbrowse_queue_depth ${stats.pending}\nopenbrowse_active_jobs ${stats.active}\nopenbrowse_queue_rejections_total{reason="memory"} ${stats.rejections.memory}\nopenbrowse_queue_rejections_total{reason="queue_full"} ${stats.rejections.queue}\nopenbrowse_memory_pressure ${stats.pressure === "normal" ? 0 : stats.pressure === "pressure" ? 1 : 2}\nopenbrowse_node_rss_megabytes ${memory.nodeRssMb.toFixed(1)}\nopenbrowse_browser_tree_rss_megabytes ${memory.browserRssMb.toFixed(1)}\nopenbrowse_process_tree_rss_megabytes ${memory.processTreeRssMb.toFixed(1)}\nopenbrowse_admission_rss_megabytes ${memory.totalRssMb.toFixed(1)}\nopenbrowse_memory_admission_authority ${authority}\nopenbrowse_browser_processes ${browser.processes}\nopenbrowse_browser_contexts ${browser.busy}\nopenbrowse_browser_workers_healthy ${browser.healthy}\nopenbrowse_browser_workers_draining ${browser.draining}\nopenbrowse_browser_workers_starting ${browser.starting}\nopenbrowse_browser_worker_launches_total ${browser.launches}\nopenbrowse_browser_worker_crashes_total ${browser.crashes}\nopenbrowse_browser_worker_recycles_total ${browser.recycled}\nopenbrowse_browser_worker_replacements_total ${browser.replacements}\n${executionMetrics()}`;
   });
   app.get("/pressure", async () => {
     await pool.refreshMemory();
@@ -164,6 +166,7 @@ export function registerPublicRoutes(input: {
         browserContexts: browser.busy,
       },
       browserWorkers: browser,
+      workerDetails: pool.workerSnapshots(),
     };
   });
   app.get("/openapi.json", async () => app.swagger());

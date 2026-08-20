@@ -17,7 +17,7 @@ export interface QueueMemorySnapshot {
 
 interface Pending<T> {
   task: () => Promise<T>;
-  resolve: (value: T) => void;
+  resolve: (value: { result: T; queueMs: number }) => void;
   reject: (reason: unknown) => void;
   createdAt: number;
   workload: WorkloadKind;
@@ -49,6 +49,7 @@ export class AdmissionQueue {
   private readonly pending: Pending<unknown>[] = [];
   private readonly samples = new Map<WorkloadKind, number[]>();
   private queueAlerted = false;
+  private readonly rejections = { memory: 0, queue: 0 };
 
   constructor(
     private readonly onQueued?: () => void,
@@ -59,20 +60,29 @@ export class AdmissionQueue {
     task: () => Promise<T>,
     workload: WorkloadKind = "unknown",
   ): Promise<{ result: T; queueMs: number }> {
-    if (this.memory().totalRssMb >= config.memoryHardMb)
+    const currentRssMb = this.memory().totalRssMb;
+    if (
+      currentRssMb >= config.memoryHardMb ||
+      currentRssMb + this.estimate(workload) >
+        config.memoryHardMb - config.memoryReserveMb
+    ) {
+      this.rejections.memory++;
       throw new OpenBrowseError(
         "MEMORY_PRESSURE",
-        "Service is at its configured memory limit",
+        "Service cannot admit this workload within its configured memory reserve",
         503,
         true,
       );
-    if (this.pending.length >= config.queueMax)
+    }
+    if (this.pending.length >= config.queueMax) {
+      this.rejections.queue++;
       throw new OpenBrowseError(
         "RATE_LIMITED",
         "Execution queue is full",
         429,
         true,
       );
+    }
     if (
       (this.pending.length > 0 || this.active >= config.maxConcurrency) &&
       !this.queueAlerted
@@ -91,8 +101,8 @@ export class AdmissionQueue {
           this.recordSample(workload, Math.max(1, this.memory().totalRssMb - before));
           return result;
         },
-        resolve: (result) =>
-          resolve({ result: result as T, queueMs: Date.now() - createdAt }),
+        resolve: (value) =>
+          resolve(value as { result: T; queueMs: number }),
         reject,
       });
       this.drain();
@@ -105,6 +115,7 @@ export class AdmissionQueue {
     pressure: "normal" | "pressure" | "critical";
     estimatedJobMemoryMb: number;
     estimatesMb: Record<WorkloadKind, number>;
+    rejections: { memory: number; queue: number };
   } {
     const rss = this.memory().totalRssMb;
     const estimatesMb = Object.fromEntries(
@@ -124,6 +135,7 @@ export class AdmissionQueue {
             : "normal",
       estimatedJobMemoryMb: estimatesMb.unknown,
       estimatesMb,
+      rejections: { ...this.rejections },
     };
   }
 
@@ -155,11 +167,12 @@ export class AdmissionQueue {
       if (this.active >= Math.max(0, memorySlots)) return;
       const job = this.pending.shift();
       if (!job) return;
+      const queueMs = Date.now() - job.createdAt;
       this.active++;
       void job.task().then(
         (result) => {
           this.active--;
-          job.resolve(result);
+          job.resolve({ result, queueMs });
           this.drain();
         },
         (error: unknown) => {
